@@ -191,14 +191,28 @@ void CheckMenuButtons()
   }
 }
 
+// Print string to LCD with trailing spaces to fill/clear the row.
+void PrintLine(int line, const char str[])
+{
+  if (line == 0)
+  {
+    lcd.setCursor(0, 0);
+  }
+  else
+  {
+    lcd.setCursor(0, 1);
+  }
+
+  char buf[32];
+  sprintf(buf, "%-16s", str);
+  lcd.printstr(buf);
+}
+
 void UpdateLCD()
 {
   char buf[20];
 
   lcd.home();
-
-  // TEMP
-  state = State::Winding;
 
   if (state == State::Standby)
   {
@@ -254,10 +268,21 @@ void UpdateLCD()
   }
   else if (state == State::Winding)
   {
-    lcd.printstr("Winding...");
-    lcd.setCursor(0, 1);
+    PrintLine(0, "Winding...");
     sprintf(buf, "%u of %u", rotationCount, windingCount);
-    lcd.printstr(buf);
+    PrintLine(1, buf);
+  }
+  else if (state == State::Pause)
+  {
+    PrintLine(0, "Winding paused.");
+    sprintf(buf, "%u of %u", rotationCount, windingCount);
+    PrintLine(1, buf);
+  }
+  else if (state == State::Stop)
+  {
+    PrintLine(0, "Winding stoped.");
+    sprintf(buf, "%u of %u", rotationCount, windingCount);
+    PrintLine(1, buf);
   }
 }
 
@@ -273,10 +298,8 @@ void StateController()
   if (state == State::Startup)
   {
   }
-
   else if (state == State::Standby)
   {
-
     // Prepare variables and hardware for winding.
 
     rotationCount = 0;
@@ -295,6 +318,10 @@ void StateController()
   else if (state == State::Winding)
   {
     analogWrite(PIN_MOTOR_PWM, 255);
+  }
+  else if (state == State::Pause)
+  {
+    analogWrite(PIN_MOTOR_PWM, 0);
   }
   else if (state == State::Stop)
   {
@@ -355,6 +382,8 @@ void setup()
       ;
   }
   */
+
+  state = State::Standby;
 }
 
 void loop()
@@ -366,10 +395,4 @@ void loop()
   CheckMenuButtons();
 
   UpdateLCD();
-
-  //digitalWrite(PIN_BUZZER, !digitalRead(PIN_HALL_EFFECT_SENSOR));
-  digitalWrite(PIN_BUZZER, !digitalRead(PIN_SWITCH_STEPPER_INDEX));
-
-  //tone(PIN_BUZZER, 880, 100);
-  //delay(1000);
 }
