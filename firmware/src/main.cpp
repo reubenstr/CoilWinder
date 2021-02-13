@@ -42,7 +42,6 @@ State state = State::Startup;
 volatile int rotationCount;
 
 
-int windingCount;
 
 
 
@@ -100,8 +99,16 @@ void UpdateLCD()
     IndexSpeed,
     IndexStart,
     IndexStop,
-
   };
+  
+
+int windingCount;
+int windingSpeed;
+int windDirection;
+int indexSpeed;
+int indexStart;
+int indexStop;
+
 
   int menuSelect = int(MenuItem::WindCount);
 
@@ -112,7 +119,6 @@ void UpdateLCD()
       lcd.print("Winding Count:");
       lcd.setCursor(0, 1);
       lcd.print(windingCount); 
-
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
@@ -185,4 +191,10 @@ void loop()
 
   //digitalWrite(PIN_BUZZER, !digitalRead(PIN_HALL_EFFECT_SENSOR));
   digitalWrite(PIN_BUZZER, !digitalRead(PIN_SWITCH_STEPPER_INDEX));
+
+
+
+  //tone(PIN_BUZZER, 880, 100);
+  //delay(1000);
+
 }
