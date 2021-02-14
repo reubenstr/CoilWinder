@@ -20,6 +20,7 @@
 #include <AccelStepper.h>
 #include <JC_Button.h> // https://github.com/JChristensen/JC_Button
 #include <TimerOne.h>  // https://playground.arduino.cc/Code/Timer1/
+#include <RunningMedian.h>
 
 #define PIN_STEPPER_DRIVER_STEP 13
 #define PIN_STEPPER_DRIVER_DIR 4
@@ -50,6 +51,7 @@ Button buttonOptionDown(PIN_BUTTON_OPTION_DOWN);
 Button buttonOptionUp(PIN_BUTTON_OPTION_UP);
 
 LiquidCrystal_I2C lcd(0x27, 20, 2);
+const int toggleDisplayDelay = 2000;
 
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
 
@@ -64,8 +66,6 @@ enum class State
 
 State state = State::Startup;
 
-volatile int rotationCount;
-
 enum class MenuItem
 {
   Home,
@@ -75,16 +75,18 @@ enum class MenuItem
   IndexSpeed,
   IndexTop,
   IndexBottom,
+  PlaySounds,
   Count
 };
 
 // Menu configurable variables.
-int windingCount;
-int windingSpeed;
+unsigned long windingCount;
+int windingSpeedRpm = 500;
 int windingDirection;
 int indexSpeed;
 double indexTop = 1.0;
 double indexBottom = 0.0;
+bool playSounds = true;
 
 // Running variables.
 double indexPosition = 0.0;
@@ -109,10 +111,23 @@ const float stepperTravelPerSteps = 0.0001968505;
 const float indexUserIncrement = 0.100;
 const float indexMaxPosition = 1.5;
 
+// Motor
+const int motorStartPwm = 64;
+const int motorMaxPwm = 255;
+const int motorIncrementPwmDelay = 100; // milliseconds.
+volatile unsigned long rotationCount;
+RunningMedian rotationDeltaRunningMedian(20);
+
+/////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
 
 void PlaySound(Tone t)
 {
+  if (!playSounds)
+  {
+    return;
+  }
+
   if (t == Tone::StepperHomeSuccess)
   {
     tone(PIN_BUZZER, 440, 125);
@@ -129,6 +144,28 @@ void PlaySound(Tone t)
     delay(125);
     tone(PIN_BUZZER, 240, 125);
   }
+  else if (t == Tone::MenuPrevious)
+  {
+    tone(PIN_BUZZER, 440, 50);
+  }
+  else if (t == Tone::MenuNext)
+  {
+    tone(PIN_BUZZER, 660, 50);
+  }
+  else if (t == Tone::OptionDecrement)
+  {
+    tone(PIN_BUZZER, 880, 50);
+  }
+  else if (t == Tone::OptionIncrement)
+  {
+    tone(PIN_BUZZER, 110, 50);
+  }
+}
+
+int MotorRpm()
+{
+  // Calculate motor RPM from delta time between rotational sensors.
+  return (1.0 / (rotationDeltaRunningMedian.getAverage() * 2.0)) * 1000.0 * 1000.0 * 60.0;
 }
 
 void SetIndexPosition(float pos)
@@ -201,7 +238,7 @@ void CheckMenuButtons()
       menuSelect--;
     }
 
-    tone(PIN_BUZZER, 440, buttonToneLengthMs);
+    PlaySound(Tone::MenuPrevious);
   }
 
   if (buttonMenuNext.wasPressed())
@@ -214,12 +251,11 @@ void CheckMenuButtons()
     {
       menuSelect++;
     }
-    tone(PIN_BUZZER, 880, buttonToneLengthMs);
+    PlaySound(Tone::MenuNext);
   }
 
   if (buttonOptionDown.wasPressed())
   {
-
     if (menuSelect == int(MenuItem::IndexBottom))
     {
       indexTop -= indexUserIncrement;
@@ -228,11 +264,11 @@ void CheckMenuButtons()
 
       SetIndexPosition(indexTop);
     }
+    PlaySound(Tone::OptionDecrement);
   }
 
   if (buttonOptionUp.wasPressed())
   {
-
     if (menuSelect == int(MenuItem::IndexBottom))
     {
       indexTop += indexUserIncrement;
@@ -242,6 +278,7 @@ void CheckMenuButtons()
       }
       SetIndexPosition(indexTop);
     }
+    PlaySound(Tone::OptionIncrement);
   }
 }
 
@@ -265,6 +302,14 @@ void PrintLine(int line, const char str[])
 void UpdateLCD()
 {
   char buf[20];
+  static unsigned long toggleDisplayMillis = millis();
+  static bool toggleDisplay;
+
+  if (millis() - toggleDisplayMillis > toggleDisplayDelay)
+  {
+    toggleDisplayMillis = millis();
+    toggleDisplay = !toggleDisplay;
+  }
 
   if (state == State::Standby)
   {
@@ -282,7 +327,7 @@ void UpdateLCD()
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
       PrintLine(0, "Winding Speed:");
-      sprintf(buf, "%u RPM", windingSpeed);
+      sprintf(buf, "%u RPM", windingSpeedRpm);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindDirection))
@@ -311,14 +356,25 @@ void UpdateLCD()
       sprintf(buf, dtostrf(indexBottom, 5, 3, "%5.3f"));
       PrintLine(1, buf);
     }
+    else if (menuSelect == int(MenuItem::PlaySounds))
+    {
+      PrintLine(0, "Play sounds:");
+      if (playSounds)
+        PrintLine(1, "Yes");
+      else
+        PrintLine(1, "No");
+    }
   }
   else if (state == State::Winding)
   {
     PrintLine(0, "Winding...");
-    //sprintf(buf, "%u of %u", rotationCount, windingCount);
-    //PrintLine(1, buf);
+    if (toggleDisplay)
+      sprintf(buf, "%u of %u", rotationCount, windingCount);
+    else
+    {
+      sprintf(buf, "%u RPM", MotorRpm());
+    }
 
-    sprintf(buf, "%u of %u", stepper.currentPosition(), stepper.targetPosition());
     PrintLine(1, buf);
   }
   else if (state == State::Pause)
@@ -335,23 +391,23 @@ void UpdateLCD()
   }
 }
 
-void StateController()
+void StateWinding(bool firstRunFlag)
 {
-  static State previousState = State::Pause;
+  static int motorPwm = 0;
+  static unsigned long motorIncrementPwmMillis = 0;
+  static bool accelerationPhase = true;
 
-  if (previousState != state)
-  {
-    previousState = state;
-  }
+  int posBottom = indexBottom / stepperTravelPerSteps;
+  int posTop = indexTop / stepperTravelPerSteps;
 
-  if (state == State::Startup)
-  {
-  }
-  else if (state == State::Standby)
+  if (firstRunFlag)
   {
     // Prepare variables and hardware for winding.
-
     rotationCount = 0;
+    motorPwm = motorStartPwm;
+    motorIncrementPwmMillis = millis();
+    accelerationPhase = true;
+    rotationDeltaRunningMedian.clear();
 
     if (windingDirection == 0)
     {
@@ -363,25 +419,59 @@ void StateController()
       digitalWrite(PIN_MOTOR_IN1, LOW);
       digitalWrite(PIN_MOTOR_IN2, HIGH);
     }
+
+    analogWrite(PIN_MOTOR_PWM, motorPwm);
+  }
+
+  if (accelerationPhase)
+  {
+    // Accelerate motor.
+    if (millis() - motorIncrementPwmMillis > motorIncrementPwmDelay)
+    {
+      motorIncrementPwmMillis = millis();
+      if (motorPwm < motorMaxPwm)
+      {
+        motorPwm++;
+        analogWrite(PIN_MOTOR_PWM, motorPwm);
+      }
+      if (MotorRpm() >= windingSpeedRpm)
+      {
+        accelerationPhase = false;
+      }
+    }
+  }
+  else
+  {
+    // TODO: implment motor PI controller.
+  }
+
+  if (stepper.currentPosition() == posTop)
+  {
+    stepper.moveTo(posBottom);
+  }
+  else if (stepper.currentPosition() == posBottom)
+  {
+    stepper.moveTo(posTop);
+  }
+  else if (!stepper.isRunning())
+  {
+    stepper.moveTo(posTop);
+  }
+}
+
+void StateController()
+{
+  static State previousState = State::Startup;
+
+  if (state == State::Startup)
+  {
+  }
+  else if (state == State::Standby)
+  {
   }
   else if (state == State::Winding)
   {
-    analogWrite(PIN_MOTOR_PWM, 255);
-
-    int posBottom = indexBottom / stepperTravelPerSteps;
-    int posTop = indexTop / stepperTravelPerSteps;
-    if (stepper.currentPosition() == posTop)
-    {
-      stepper.moveTo(posBottom);
-    }
-    else if (stepper.currentPosition() == posBottom)
-    {
-      stepper.moveTo(posTop);
-    }
-    else if (!stepper.isRunning())
-    {
-      stepper.moveTo(posTop);
-    }
+    StateWinding(previousState != State::Winding);
   }
   else if (state == State::Pause)
   {
@@ -391,9 +481,12 @@ void StateController()
   {
     analogWrite(PIN_MOTOR_PWM, 0);
   }
+
+  previousState = state;
 }
 
-bool HomeStepper()
+// Call prior to enabling tick interrupt.
+bool HomeIndexerStepper()
 {
   PrintLine(0, "Homing stepper");
 
@@ -423,14 +516,27 @@ bool HomeStepper()
 // Interrupt callback.
 void CountRotation()
 {
-  rotationCount++;
+  static unsigned long prevMicros;
+  rotationDeltaRunningMedian.add(micros() - prevMicros);
+  prevMicros = micros();
+
+  // Two pulses per rotation.
+  static bool countToggle = true;
+  countToggle = !countToggle;
+  if (countToggle)
+  {
+    rotationCount++;
+  }
 }
 
 // Timer interupt callback
-void TickStepperCallback()
+void IndexerStepperCallback()
 {
   stepper.run();
 }
+
+/////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////
 
 void setup()
 {
@@ -453,8 +559,6 @@ void setup()
   lcd.backlight();
   lcd.clear();
 
-  rotationCount = 0;
-
   stepper.setMaxSpeed(2000);
   stepper.setAcceleration(8000);
 
@@ -465,7 +569,7 @@ void setup()
 
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_EFFECT_SENSOR), CountRotation, FALLING);
 
-  if (HomeStepper() == false)
+  if (HomeIndexerStepper() == false)
   {
     PrintLine(0, "Stepper failed");
     PrintLine(1, "to home!");
@@ -478,8 +582,9 @@ void setup()
     PlaySound(Tone::StepperHomeSuccess);
   }
 
-  Timer1.initialize(1000);
-  Timer1.attachInterrupt(TickStepperCallback);
+  // Setup timer for stepper motor tick.
+  Timer1.initialize(1000); // microseconds.
+  Timer1.attachInterrupt(IndexerStepperCallback);
 
   state = State::Standby;
   menuSelect = int(MenuItem::IndexBottom);
@@ -494,6 +599,4 @@ void loop()
   CheckMenuButtons();
 
   UpdateLCD(); // ~52ms processing time.
-
-
 }
