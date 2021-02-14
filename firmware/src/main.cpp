@@ -1,4 +1,17 @@
-// Coil-Winder
+/*
+  Coil-Winder
+
+
+
+  Notes:
+
+  Indexer lead screw is 2mm travel per turn (0.0787402 inches).
+  400
+
+  0.0787402 / 400 = 0.0001968505 per step
+
+
+*/
 
 #include <Arduino.h>
 
@@ -6,6 +19,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <AccelStepper.h>
 #include <JC_Button.h> // https://github.com/JChristensen/JC_Button
+#include <TimerOne.h>  // https://playground.arduino.cc/Code/Timer1/
 
 #define PIN_STEPPER_DRIVER_STEP 13
 #define PIN_STEPPER_DRIVER_DIR 4
@@ -59,46 +73,67 @@ enum class MenuItem
   WindSpeed,
   WindDirection,
   IndexSpeed,
-  IndexStart,
-  IndexStop,
+  IndexTop,
+  IndexBottom,
   Count
 };
 
+// Menu configurable variables.
 int windingCount;
 int windingSpeed;
 int windingDirection;
 int indexSpeed;
-int indexStart;
-int indexStop;
+double indexTop = 1.0;
+double indexBottom = 0.0;
+
+// Running variables.
+double indexPosition = 0.0;
 
 int menuSelect = int(MenuItem::WindCount);
 
 const int buttonToneLengthMs = 20;
 
+enum class Tone
+{
+  StepperHomeSuccess,
+  StepperHomeFailed,
+  MenuPrevious,
+  MenuNext,
+  OptionDecrement,
+  OptionIncrement
+};
+
+// Indexer lead screw is 2mm travel per turn (0.0787402 inches).
+// 0.0787402 / 400 = 0.0001968505 per step
+const float stepperTravelPerSteps = 0.0001968505;
+const float indexUserIncrement = 0.100;
+const float indexMaxPosition = 1.5;
+
 /////////////////////////////////////////////////////////////////////////////
 
-bool HomeStepper()
+void PlaySound(Tone t)
 {
-  lcd.clear();
-  lcd.home();
-  lcd.print("Homing stepper");
-
-  stepper.setCurrentPosition(0);
-  stepper.moveTo(-2400);
-
-  bool indexSuccessFlag = false;
-
-  while (stepper.distanceToGo() != 0)
+  if (t == Tone::StepperHomeSuccess)
   {
-    if (digitalRead(PIN_SWITCH_STEPPER_INDEX) == BUTTON_ACTIVE)
-    {
-      indexSuccessFlag = true;
-      break;
-    }
-    stepper.run();
+    tone(PIN_BUZZER, 440, 125);
+    delay(125);
+    tone(PIN_BUZZER, 540, 125);
+    delay(125);
+    tone(PIN_BUZZER, 640, 125);
   }
+  else if (t == Tone::StepperHomeFailed)
+  {
+    tone(PIN_BUZZER, 440, 125);
+    delay(125);
+    tone(PIN_BUZZER, 340, 125);
+    delay(125);
+    tone(PIN_BUZZER, 240, 125);
+  }
+}
 
-  return indexSuccessFlag;
+void SetIndexPosition(float pos)
+{
+  stepper.moveTo(pos / stepperTravelPerSteps);
 }
 
 void CheckControlButtons()
@@ -110,7 +145,7 @@ void CheckControlButtons()
 
   if (analogRead(PIN_BUTTON_START) == 0)
   {
-    if (millis() - startHeldCount > 1000)
+    if (millis() - startHeldCount > 100)
     {
       state = State::Winding;
     }
@@ -122,7 +157,7 @@ void CheckControlButtons()
 
   if (analogRead(PIN_BUTTON_PAUSE) == 0)
   {
-    if (millis() - pauseHeldCount > 1000)
+    if (millis() - pauseHeldCount > 100)
     {
       state = State::Pause;
     }
@@ -134,7 +169,7 @@ void CheckControlButtons()
 
   if (analogRead(PIN_BUTTON_STOP) == 0)
   {
-    if (millis() - stopHeldCount > 1000)
+    if (millis() - stopHeldCount > 100)
     {
       state = State::Stop;
     }
@@ -184,10 +219,29 @@ void CheckMenuButtons()
 
   if (buttonOptionDown.wasPressed())
   {
+
+    if (menuSelect == int(MenuItem::IndexBottom))
+    {
+      indexTop -= indexUserIncrement;
+      if (indexTop < 0)
+        indexTop = 0;
+
+      SetIndexPosition(indexTop);
+    }
   }
 
   if (buttonOptionUp.wasPressed())
   {
+
+    if (menuSelect == int(MenuItem::IndexBottom))
+    {
+      indexTop += indexUserIncrement;
+      if (indexTop > indexMaxPosition)
+      {
+        indexTop = indexMaxPosition;
+      }
+      SetIndexPosition(indexTop);
+    }
   }
 }
 
@@ -212,64 +266,59 @@ void UpdateLCD()
 {
   char buf[20];
 
-  lcd.home();
-
   if (state == State::Standby)
   {
     if (menuSelect == int(MenuItem::Home))
     {
-      lcd.printstr("Coil Winder");
-      lcd.setCursor(0, 1);
+      PrintLine(0, "Coil Winder");
+      PrintLine(1, "");
     }
     else if (menuSelect == int(MenuItem::WindCount))
     {
-      lcd.printstr("Winding Count:");
-      lcd.setCursor(0, 1);
+      PrintLine(0, "Winding Count:");
       sprintf(buf, "%u Rotations", windingCount);
-      lcd.printstr(buf);
+      PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      lcd.printstr("Winding Speed:");
-      lcd.setCursor(0, 1);
+      PrintLine(0, "Winding Speed:");
       sprintf(buf, "%u RPM", windingSpeed);
-      lcd.printstr(buf);
+      PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindDirection))
     {
-      lcd.printstr("Winding Direction:");
-      lcd.setCursor(0, 1);
+      PrintLine(0, "Winding Direction:");
       if (windingDirection == 0)
-        lcd.printstr("CC");
+        PrintLine(1, buf);
       else if (windingDirection == 1)
-        lcd.printstr("CCW");
+        PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
-      lcd.printstr("Index Speed:");
-      lcd.setCursor(0, 1);
+      PrintLine(0, "Index Speed:");
       sprintf(buf, "%u RPM", indexSpeed);
-      lcd.printstr(buf);
+      PrintLine(1, buf);
     }
-    else if (menuSelect == int(MenuItem::IndexStart))
+    else if (menuSelect == int(MenuItem::IndexTop))
     {
-      lcd.printstr("Index Start:");
-      lcd.setCursor(0, 1);
-      sprintf(buf, "%u In/bottom", indexStart);
-      lcd.printstr(buf);
+      PrintLine(0, "Index Top:");
+      sprintf(buf, dtostrf(indexTop, 5, 3, "%5.3f"));
+      PrintLine(1, buf);
     }
-    else if (menuSelect == int(MenuItem::IndexStop))
+    else if (menuSelect == int(MenuItem::IndexBottom))
     {
-      lcd.printstr("Index Stop:");
-      lcd.setCursor(0, 1);
-      sprintf(buf, "%u Inch/bottom", indexStop);
-      lcd.printstr(buf);
+      PrintLine(0, "Index Bottom:");
+      sprintf(buf, dtostrf(indexBottom, 5, 3, "%5.3f"));
+      PrintLine(1, buf);
     }
   }
   else if (state == State::Winding)
   {
     PrintLine(0, "Winding...");
-    sprintf(buf, "%u of %u", rotationCount, windingCount);
+    //sprintf(buf, "%u of %u", rotationCount, windingCount);
+    //PrintLine(1, buf);
+
+    sprintf(buf, "%u of %u", stepper.currentPosition(), stepper.targetPosition());
     PrintLine(1, buf);
   }
   else if (state == State::Pause)
@@ -318,6 +367,21 @@ void StateController()
   else if (state == State::Winding)
   {
     analogWrite(PIN_MOTOR_PWM, 255);
+
+    int posBottom = indexBottom / stepperTravelPerSteps;
+    int posTop = indexTop / stepperTravelPerSteps;
+    if (stepper.currentPosition() == posTop)
+    {
+      stepper.moveTo(posBottom);
+    }
+    else if (stepper.currentPosition() == posBottom)
+    {
+      stepper.moveTo(posTop);
+    }
+    else if (!stepper.isRunning())
+    {
+      stepper.moveTo(posTop);
+    }
   }
   else if (state == State::Pause)
   {
@@ -329,10 +393,43 @@ void StateController()
   }
 }
 
+bool HomeStepper()
+{
+  PrintLine(0, "Homing stepper");
+
+  stepper.setCurrentPosition(0);
+  stepper.moveTo(-(indexMaxPosition / stepperTravelPerSteps));
+
+  bool indexSuccessFlag = false;
+
+  while (stepper.distanceToGo() != 0)
+  {
+    if (digitalRead(PIN_SWITCH_STEPPER_INDEX) == BUTTON_ACTIVE)
+    {
+      stepper.setCurrentPosition(0);
+      stepper.moveTo(200);
+      stepper.runToPosition();
+      stepper.setCurrentPosition(0);
+      indexPosition = 0;
+      indexSuccessFlag = true;
+      break;
+    }
+    stepper.run();
+  }
+
+  return indexSuccessFlag;
+}
+
 // Interrupt callback.
 void CountRotation()
 {
   rotationCount++;
+}
+
+// Timer interupt callback
+void TickStepperCallback()
+{
+  stepper.run();
 }
 
 void setup()
@@ -355,12 +452,11 @@ void setup()
   lcd.init();
   lcd.backlight();
   lcd.clear();
-  lcd.printstr("Coil Winder");
 
   rotationCount = 0;
 
-  stepper.setMaxSpeed(1000);
-  stepper.setAcceleration(4000);
+  stepper.setMaxSpeed(2000);
+  stepper.setAcceleration(8000);
 
   buttonMenuPrevious.begin();
   buttonMenuNext.begin();
@@ -369,21 +465,24 @@ void setup()
 
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_EFFECT_SENSOR), CountRotation, FALLING);
 
-  /*
   if (HomeStepper() == false)
   {
-    lcd.clear();
-    lcd.home();
-    lcd.print("Stepper failed");
-    lcd.setCursor(0, 1);
-    lcd.print("to home!");
-
+    PrintLine(0, "Stepper failed");
+    PrintLine(1, "to home!");
+    PlaySound(Tone::StepperHomeFailed);
     while (true)
       ;
   }
-  */
+  else
+  {
+    PlaySound(Tone::StepperHomeSuccess);
+  }
+
+  Timer1.initialize(1000);
+  Timer1.attachInterrupt(TickStepperCallback);
 
   state = State::Standby;
+  menuSelect = int(MenuItem::IndexBottom);
 }
 
 void loop()
@@ -394,5 +493,7 @@ void loop()
 
   CheckMenuButtons();
 
-  UpdateLCD();
+  UpdateLCD(); // ~52ms processing time.
+
+
 }
