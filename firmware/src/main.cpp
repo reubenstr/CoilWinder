@@ -33,22 +33,26 @@
 #define PIN_BUTTON_PAUSE A6
 #define PIN_BUTTON_STOP A3
 
-#define PIN_BUTTON_MENU_PREVIOUS 5
-#define PIN_BUTTON_MENU_NEXT 9
-#define PIN_BUTTON_OPTION_DOWN 10
+#define PIN_BUTTON_MENU_PREVIOUS A2
+#define PIN_BUTTON_MENU_NEXT A1
+#define PIN_BUTTON_OPTION_DOWN A0
 #define PIN_BUTTON_OPTION_UP 12
 
 #define PIN_HALL_EFFECT_SENSOR 2
 #define PIN_SWITCH_STEPPER_INDEX 3
 
-#define PIN_BUZZER 11
+#define PIN_LED_START 11
+#define PIN_LED_PAUSE 10
+#define PIN_LED_STOP 9
+
+#define PIN_BUZZER 5
 
 #define BUTTON_ACTIVE 0
 
 Button buttonMenuPrevious(PIN_BUTTON_MENU_PREVIOUS);
 Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
-Button buttonOptionDown(PIN_BUTTON_OPTION_DOWN);
-Button buttonOptionUp(PIN_BUTTON_OPTION_UP);
+Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
+Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
 
 LiquidCrystal_I2C lcd(0x27, 20, 2);
 const int toggleDisplayDelay = 2000;
@@ -57,14 +61,13 @@ AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_
 
 enum class State
 {
-  Startup,
   Standby,
   Winding,
   Pause,
   Stop
 };
 
-State state = State::Startup;
+State state = State::Standby;
 
 enum class MenuItem
 {
@@ -88,6 +91,12 @@ double indexTop = 1.0;
 double indexBottom = 0.0;
 bool playSounds = true;
 
+const int windingSpeedRpmMin = 400;
+const int windingSpeedRpmMax = 1000;
+const int indexSpeedRpmMin = 10;
+const int indexSpeedRpmMax = 100;
+
+
 // Running variables.
 double indexPosition = 0.0;
 
@@ -110,6 +119,7 @@ enum class Tone
 const float stepperTravelPerSteps = 0.0001968505;
 const float indexUserIncrement = 0.100;
 const float indexMaxPosition = 1.5;
+const float indexMinPosition = 0;
 
 // Motor
 const int motorStartPwm = 64;
@@ -158,7 +168,7 @@ void PlaySound(Tone t)
   }
   else if (t == Tone::OptionIncrement)
   {
-    tone(PIN_BUZZER, 110, 50);
+    tone(PIN_BUZZER, 1100, 50);
   }
 }
 
@@ -186,9 +196,11 @@ void CheckControlButtons()
     {
       state = State::Winding;
     }
+    digitalWrite(PIN_LED_START, HIGH);
   }
   else
   {
+    digitalWrite(PIN_LED_START, LOW);
     startHeldCount = millis();
   }
 
@@ -198,9 +210,11 @@ void CheckControlButtons()
     {
       state = State::Pause;
     }
+    digitalWrite(PIN_LED_PAUSE, HIGH);
   }
   else
   {
+    digitalWrite(PIN_LED_PAUSE, LOW);
     pauseHeldCount = millis();
   }
 
@@ -210,9 +224,11 @@ void CheckControlButtons()
     {
       state = State::Stop;
     }
+    digitalWrite(PIN_LED_STOP, HIGH);
   }
   else
   {
+    digitalWrite(PIN_LED_STOP, LOW);
     stopHeldCount = millis();
   }
 }
@@ -222,8 +238,8 @@ void CheckMenuButtons()
 
   buttonMenuPrevious.read();
   buttonMenuNext.read();
-  buttonOptionDown.read();
-  buttonOptionUp.read();
+  buttonOptionDecrement.read();
+  buttonOptionIncrement.read();
 
   // TODO: check system state, dont allow button presses while winding.
 
@@ -254,29 +270,109 @@ void CheckMenuButtons()
     PlaySound(Tone::MenuNext);
   }
 
-  if (buttonOptionDown.wasPressed())
+  // Option decrement.
+  if (buttonOptionDecrement.wasPressed())
   {
-    if (menuSelect == int(MenuItem::IndexBottom))
+    if (menuSelect == int(MenuItem::WindCount))
+    {
+      if (windingCount > 10)
+      {
+        windingCount -= 10;
+      }
+    }
+    else if (menuSelect == int(MenuItem::WindSpeed))
+    {
+      if (windingSpeedRpm >= windingSpeedRpmMin + 10)
+      {
+        windingSpeedRpm -= 10;
+      }
+    }
+    else if (menuSelect == int(MenuItem::WindDirection))
+    {
+      if (windingDirection == 0)
+        windingDirection = 1;
+      else
+        windingDirection = 0;
+    }
+    else if (menuSelect == int(MenuItem::IndexSpeed))
+    {
+      if (indexSpeed >= indexSpeedRpmMin + 10)
+      {
+        indexSpeed -= 10;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexTop))
     {
       indexTop -= indexUserIncrement;
       if (indexTop < 0)
         indexTop = 0;
-
       SetIndexPosition(indexTop);
+    }
+    else if (menuSelect == int(MenuItem::IndexBottom))
+    {
+      indexBottom -= indexUserIncrement;
+      if (indexBottom < 0)
+        indexBottom = 0;
+      SetIndexPosition(indexBottom);
+    }
+    else if (menuSelect == int(MenuItem::PlaySounds))
+    {
+      if (playSounds)
+        playSounds = false;
+      else
+        playSounds = true;
     }
     PlaySound(Tone::OptionDecrement);
   }
 
-  if (buttonOptionUp.wasPressed())
+  // Option increment.
+  if (buttonOptionIncrement.wasPressed())
   {
-    if (menuSelect == int(MenuItem::IndexBottom))
+    if (menuSelect == int(MenuItem::WindCount))
+    {      
+        windingCount += 10;      
+    }
+    else if (menuSelect == int(MenuItem::WindSpeed))
+    {
+      if (windingSpeedRpm <= windingSpeedRpmMax - 10)
+      {
+        windingSpeedRpm += 10;
+      }
+    }
+    else if (menuSelect == int(MenuItem::WindDirection))
+    {
+      if (windingDirection == 0)
+        windingDirection = 1;
+      else
+        windingDirection = 0;
+    }
+    else if (menuSelect == int(MenuItem::IndexSpeed))
+    {
+      if (indexSpeed <= indexSpeedRpmMax - 10)
+      {
+        indexSpeed += 10;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexTop))
     {
       indexTop += indexUserIncrement;
       if (indexTop > indexMaxPosition)
-      {
         indexTop = indexMaxPosition;
-      }
       SetIndexPosition(indexTop);
+    }
+    else if (menuSelect == int(MenuItem::IndexBottom))
+    {
+      indexBottom += indexUserIncrement;
+      if (indexBottom > indexMaxPosition)
+        indexBottom = indexMaxPosition;
+      SetIndexPosition(indexBottom);
+    }
+    else if (menuSelect == int(MenuItem::PlaySounds))
+    {
+      if (playSounds)
+        playSounds = false;
+      else
+        playSounds = true;
     }
     PlaySound(Tone::OptionIncrement);
   }
@@ -334,9 +430,9 @@ void UpdateLCD()
     {
       PrintLine(0, "Winding Direction:");
       if (windingDirection == 0)
-        PrintLine(1, buf);
+        PrintLine(1, "CC");
       else if (windingDirection == 1)
-        PrintLine(1, buf);
+        PrintLine(1, "CCW");
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
@@ -445,6 +541,7 @@ void StateWinding(bool firstRunFlag)
     // TODO: implment motor PI controller.
   }
 
+  // Move indexer up and down.
   if (stepper.currentPosition() == posTop)
   {
     stepper.moveTo(posBottom);
@@ -457,16 +554,20 @@ void StateWinding(bool firstRunFlag)
   {
     stepper.moveTo(posTop);
   }
+
+  // Check for final conditions.
+  if (rotationCount / 2 >= windingCount)
+  {
+    state = State::Stop;
+  }
+
 }
 
 void StateController()
 {
-  static State previousState = State::Startup;
+  static State previousState = State::Standby;
 
-  if (state == State::Startup)
-  {
-  }
-  else if (state == State::Standby)
+  if (state == State::Standby)
   {
   }
   else if (state == State::Winding)
@@ -480,6 +581,7 @@ void StateController()
   else if (state == State::Stop)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
+    state = State::Standby;
   }
 
   previousState = state;
@@ -555,6 +657,10 @@ void setup()
   pinMode(PIN_MOTOR_IN2, OUTPUT);
   pinMode(PIN_MOTOR_PWM, OUTPUT);
 
+  pinMode(PIN_LED_START, OUTPUT);
+  pinMode(PIN_LED_PAUSE, OUTPUT);
+  pinMode(PIN_LED_STOP, OUTPUT);
+
   lcd.init();
   lcd.backlight();
   lcd.clear();
@@ -564,8 +670,8 @@ void setup()
 
   buttonMenuPrevious.begin();
   buttonMenuNext.begin();
-  buttonOptionDown.begin();
-  buttonOptionUp.begin();
+  buttonOptionDecrement.begin();
+  buttonOptionIncrement.begin();
 
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_EFFECT_SENSOR), CountRotation, FALLING);
 
