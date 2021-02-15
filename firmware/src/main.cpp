@@ -1,68 +1,61 @@
 /*
-  Coil-Winder
+  Project: Coil Winder
+  Author: Reuben Strangelove
+  Date: 2021/15/2
+  Description: Coil winder machine controller for winding electric musical intrument pickup coils.
 
-
+  Hardware:
+    Microcontroller: Arduino Nano (Atmel Atmega328P)
+    Motor driver: TB6612FNG module.
+    Stepper driver: TMC2208 module (non-UART version).
+    
 
   Notes:
+    
 
-  Indexer lead screw is 2mm travel per turn (0.0787402 inches).
-  400
-
-  0.0787402 / 400 = 0.0001968505 per step
+  To Do:
+    No motor RPM detected timeout.
 
 
-  TODO:
+  HISTORY
 
-  No motor rpm detected timeout.
+  VERSION  AUTHOR  DATE  NOTES
+  ===============================
+  0.1.0 ReubenStr 2021/15/2 Development phase.
 
 */
 
 #include <Arduino.h>
-
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-#include <AccelStepper.h> // https://github.com/waspinator/AccelStepper
-#include <JC_Button.h>    // https://github.com/JChristensen/JC_Button
-#include <TimerOne.h>     // https://playground.arduino.cc/Code/Timer1/
-#include <PID_v1.h>       // https://github.com/br3ttb/Arduino-PID-Library
-#include <RunningMedian.h>
+#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C
+#include <AccelStepper.h>       // https://github.com/waspinator/AccelStepper
+#include <JC_Button.h>          // https://github.com/JChristensen/JC_Button
+#include <TimerOne.h>           // https://playground.arduino.cc/Code/Timer1/
+#include <PID_v1.h>             // https://github.com/br3ttb/Arduino-PID-Library
+#include <RunningMedian.h>      // https://github.com/RobTillaart/RunningMedian
 
 #define PIN_STEPPER_DRIVER_STEP 13
 #define PIN_STEPPER_DRIVER_DIR 4
-
 #define PIN_MOTOR_PWM 6
 #define PIN_MOTOR_IN1 8
 #define PIN_MOTOR_IN2 7
-
 #define PIN_BUTTON_START A7
 #define PIN_BUTTON_PAUSE A6
 #define PIN_BUTTON_STOP A3
-
 #define PIN_BUTTON_MENU_PREVIOUS A2
 #define PIN_BUTTON_MENU_NEXT A1
 #define PIN_BUTTON_OPTION_DOWN A0
 #define PIN_BUTTON_OPTION_UP 12
-
 #define PIN_HALL_EFFECT_SENSOR 2
 #define PIN_SWITCH_STEPPER_INDEX 3
-
 #define PIN_LED_START 11
 #define PIN_LED_PAUSE 10
 #define PIN_LED_STOP 9
-
 #define PIN_BUZZER 5
 
 #define BUTTON_ACTIVE 0
 
-Button buttonMenuPrevious(PIN_BUTTON_MENU_PREVIOUS);
-Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
-Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
-Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
 
-LiquidCrystal_I2C lcd(0x27, 20, 2);
-const int toggleDisplayDelay = 2000;
-
-AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
 
 enum class State
 {
@@ -87,6 +80,7 @@ enum class MenuItem
   Count
 };
 
+
 // Menu configurable variables.
 int windingCount = 1000;
 int windingSpeedRpm = 1000;
@@ -102,7 +96,7 @@ const int indexSpeedRpmMin = 10;
 const int indexSpeedRpmMax = 100;
 
 // Running variables.
-double indexPosition = 0.0;
+
 
 int menuSelect = int(MenuItem::WindCount);
 
@@ -121,30 +115,40 @@ enum class Tone
   StoppedWinding
 };
 
+// Stepper.
 // Indexer lead screw is 2mm travel per turn (0.0787402 inches).
 // 0.0787402 / 400 = 0.0001968505 per step (at 1/2 step microstepping)
-const float stepperTravelPerSteps = 0.0001968505;
-const float indexUserIncrement = 0.100;
-const float indexMaxPosition = 1.5;
-const float indexMinPosition = 0;
+AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
+const float stepperTravelPerSteps = 0.0001968505; // Inches.
+const float indexUserIncrement = 0.050; // Inches.
+const float indexMaxPosition = 1.5; // Inches. Determined by machine physical travel limit.
+const float indexMinPosition = 0; // Inches.
+double indexPosition = 0.0; // Inches from homed position.
 
-// Motor
-const int motorStartRPM = 250;
+// DC Motor.
 const int motorPwmMin = 64;
 const int motorPwmMax = 255;
 const int motorIncrementPwmDelay = 50; // milliseconds.
 volatile int skipReadingsCount;
 const int skipReadingsNum = 2;
 volatile int rotationCount;
-
 RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
 
 // Motor PID controller.
 double pidSetpoint, pidInputRPM, pidOutputPWM;
-
 double Kp = .05, Ki = .075, Kd = .01;
-
 PID motorPID(&pidInputRPM, &pidOutputPWM, &pidSetpoint, Kp, Ki, Kd, DIRECT);
+
+// Buttons.
+Button buttonMenuPrevious(PIN_BUTTON_MENU_PREVIOUS);
+Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
+Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
+Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
+
+// Display.
+LiquidCrystal_I2C lcd(0x27, 20, 2);
+const int toggleDisplayDelay = 2000;
+
 
 /////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
@@ -553,7 +557,7 @@ void StateWinding(bool firstRunFlag)
     accelerationPhase = true;
     skipReadingsCount = 0;
     rotationDeltaRunningMedian.clear();
-    pidSetpoint = motorStartRPM;
+
     playRpmReachedToneFlag = true;
 
     if (windingDirection == 0)
