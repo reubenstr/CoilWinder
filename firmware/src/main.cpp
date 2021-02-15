@@ -11,15 +11,20 @@
   0.0787402 / 400 = 0.0001968505 per step
 
 
+  TODO:
+
+  No motor rpm detected timeout.
+
 */
 
 #include <Arduino.h>
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include <AccelStepper.h>
-#include <JC_Button.h> // https://github.com/JChristensen/JC_Button
-#include <TimerOne.h>  // https://playground.arduino.cc/Code/Timer1/
+#include <AccelStepper.h> // https://github.com/waspinator/AccelStepper
+#include <JC_Button.h>    // https://github.com/JChristensen/JC_Button
+#include <TimerOne.h>     // https://playground.arduino.cc/Code/Timer1/
+#include <PID_v1.h>       // https://github.com/br3ttb/Arduino-PID-Library
 #include <RunningMedian.h>
 
 #define PIN_STEPPER_DRIVER_STEP 13
@@ -83,19 +88,18 @@ enum class MenuItem
 };
 
 // Menu configurable variables.
-unsigned long windingCount;
+int windingCount = 1000;
 int windingSpeedRpm = 500;
 int windingDirection;
 int indexSpeed;
-double indexTop = 1.0;
+double indexTop = 0.25;
 double indexBottom = 0.0;
 bool playSounds = true;
 
-const int windingSpeedRpmMin = 400;
+const int windingSpeedRpmMin = 300;
 const int windingSpeedRpmMax = 1000;
 const int indexSpeedRpmMin = 10;
 const int indexSpeedRpmMax = 100;
-
 
 // Running variables.
 double indexPosition = 0.0;
@@ -111,7 +115,10 @@ enum class Tone
   MenuPrevious,
   MenuNext,
   OptionDecrement,
-  OptionIncrement
+  OptionIncrement,
+  RpmReached,
+  StoppedWindingSuccess,
+  StoppedWinding
 };
 
 // Indexer lead screw is 2mm travel per turn (0.0787402 inches).
@@ -122,11 +129,17 @@ const float indexMaxPosition = 1.5;
 const float indexMinPosition = 0;
 
 // Motor
-const int motorStartPwm = 64;
+//const int motorStartPwm = 64;
+const int motorStartRPM = 250;
 const int motorMaxPwm = 255;
-const int motorIncrementPwmDelay = 100; // milliseconds.
-volatile unsigned long rotationCount;
-RunningMedian rotationDeltaRunningMedian(20);
+const int motorIncrementPwmDelay = 50; // milliseconds.
+volatile int rotationCount;
+RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM, affects PID controller.
+
+// Motor PID controller.
+double pidSetpoint, pidInputRPM, pidOutputPWM;
+double Kp = .125, Ki = .25, Kd = .1;
+PID motorPID(&pidInputRPM, &pidOutputPWM, &pidSetpoint, Kp, Ki, Kd, DIRECT);
 
 /////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
@@ -169,6 +182,27 @@ void PlaySound(Tone t)
   else if (t == Tone::OptionIncrement)
   {
     tone(PIN_BUZZER, 1100, 50);
+  }
+  else if (t == Tone::RpmReached)
+  {
+     tone(PIN_BUZZER, 880, 100);  
+     delay(200);
+     tone(PIN_BUZZER, 880, 100); 
+  }
+  else if (t == Tone::StoppedWindingSuccess)
+  {
+    tone(PIN_BUZZER, 550, 250);
+    delay(275);
+    tone(PIN_BUZZER, 440, 250);
+    delay(275);
+    tone(PIN_BUZZER, 550, 125);
+    delay(150);
+    tone(PIN_BUZZER, 650, 1000);
+    //delay(1000);
+  }
+  else if (t == Tone::StoppedWinding)
+  {
+    tone(PIN_BUZZER, 240, 500);
   }
 }
 
@@ -329,8 +363,8 @@ void CheckMenuButtons()
   if (buttonOptionIncrement.wasPressed())
   {
     if (menuSelect == int(MenuItem::WindCount))
-    {      
-        windingCount += 10;      
+    {
+      windingCount += 10;
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
@@ -416,19 +450,19 @@ void UpdateLCD()
     }
     else if (menuSelect == int(MenuItem::WindCount))
     {
-      PrintLine(0, "Winding Count:");
+      PrintLine(0, "Count:");
       sprintf(buf, "%u Rotations", windingCount);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      PrintLine(0, "Winding Speed:");
+      PrintLine(0, "Speed:");
       sprintf(buf, "%u RPM", windingSpeedRpm);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindDirection))
     {
-      PrintLine(0, "Winding Direction:");
+      PrintLine(0, "Direction:");
       if (windingDirection == 0)
         PrintLine(1, "CC");
       else if (windingDirection == 1)
@@ -489,21 +523,37 @@ void UpdateLCD()
 
 void StateWinding(bool firstRunFlag)
 {
-  static int motorPwm = 0;
   static unsigned long motorIncrementPwmMillis = 0;
   static bool accelerationPhase = true;
+  static int motorRpm;
 
   int posBottom = indexBottom / stepperTravelPerSteps;
   int posTop = indexTop / stepperTravelPerSteps;
 
+  // TEMP
+  static unsigned long start = millis();
+  if (millis() - start > 250)
+  {
+    start = millis();
+    Serial.print(MotorRpm());
+    Serial.print(" | ");
+    Serial.print(windingSpeedRpm);
+    Serial.print(" | ");
+    //Serial.print(motorPwm);
+    Serial.print(" | ");
+    Serial.print(pidOutputPWM);
+    Serial.print(" | ");
+    Serial.println(pidSetpoint);
+  }
+
+  // Prepare variables and hardware for winding.
   if (firstRunFlag)
   {
-    // Prepare variables and hardware for winding.
     rotationCount = 0;
-    motorPwm = motorStartPwm;
     motorIncrementPwmMillis = millis();
     accelerationPhase = true;
     rotationDeltaRunningMedian.clear();
+    motorRpm = motorStartRPM;
 
     if (windingDirection == 0)
     {
@@ -515,31 +565,31 @@ void StateWinding(bool firstRunFlag)
       digitalWrite(PIN_MOTOR_IN1, LOW);
       digitalWrite(PIN_MOTOR_IN2, HIGH);
     }
-
-    analogWrite(PIN_MOTOR_PWM, motorPwm);
   }
 
+  // Accelerate motor until target RPM is reached.
   if (accelerationPhase)
-  {
-    // Accelerate motor.
+  {   
     if (millis() - motorIncrementPwmMillis > motorIncrementPwmDelay)
     {
       motorIncrementPwmMillis = millis();
-      if (motorPwm < motorMaxPwm)
+      if (motorRpm < windingSpeedRpm)
       {
-        motorPwm++;
-        analogWrite(PIN_MOTOR_PWM, motorPwm);
+        motorRpm++;
+        pidSetpoint = motorRpm; 
       }
-      if (MotorRpm() >= windingSpeedRpm)
+      else
       {
+        PlaySound(Tone::RpmReached);
         accelerationPhase = false;
       }
     }
   }
-  else
-  {
-    // TODO: implment motor PI controller.
-  }
+
+  // Motor PID controller.
+  pidInputRPM = MotorRpm();
+  motorPID.Compute();
+  analogWrite(PIN_MOTOR_PWM, pidOutputPWM);
 
   // Move indexer up and down.
   if (stepper.currentPosition() == posTop)
@@ -556,11 +606,12 @@ void StateWinding(bool firstRunFlag)
   }
 
   // Check for final conditions.
-  if (rotationCount / 2 >= windingCount)
+  if (rotationCount >= windingCount)
   {
+    analogWrite(PIN_MOTOR_PWM, 0);
+    PlaySound(Tone::StoppedWindingSuccess);
     state = State::Stop;
   }
-
 }
 
 void StateController()
@@ -688,12 +739,15 @@ void setup()
     PlaySound(Tone::StepperHomeSuccess);
   }
 
+  motorPID.SetOutputLimits(64, 255);
+  motorPID.SetMode(AUTOMATIC);
+
   // Setup timer for stepper motor tick.
   Timer1.initialize(1000); // microseconds.
   Timer1.attachInterrupt(IndexerStepperCallback);
 
   state = State::Standby;
-  menuSelect = int(MenuItem::IndexBottom);
+  menuSelect = int(MenuItem::Home);
 }
 
 void loop()
