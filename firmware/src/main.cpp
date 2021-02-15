@@ -89,7 +89,7 @@ enum class MenuItem
 
 // Menu configurable variables.
 int windingCount = 1000;
-int windingSpeedRpm = 500;
+int windingSpeedRpm = 1000;
 int windingDirection;
 int indexSpeed;
 double indexTop = 0.25;
@@ -122,23 +122,28 @@ enum class Tone
 };
 
 // Indexer lead screw is 2mm travel per turn (0.0787402 inches).
-// 0.0787402 / 400 = 0.0001968505 per step
+// 0.0787402 / 400 = 0.0001968505 per step (at 1/2 step microstepping)
 const float stepperTravelPerSteps = 0.0001968505;
 const float indexUserIncrement = 0.100;
 const float indexMaxPosition = 1.5;
 const float indexMinPosition = 0;
 
 // Motor
-//const int motorStartPwm = 64;
 const int motorStartRPM = 250;
-const int motorMaxPwm = 255;
+const int motorPwmMin = 64;
+const int motorPwmMax = 255;
 const int motorIncrementPwmDelay = 50; // milliseconds.
+volatile int skipReadingsCount;
+const int skipReadingsNum = 2;
 volatile int rotationCount;
-RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM, affects PID controller.
+
+RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
 
 // Motor PID controller.
 double pidSetpoint, pidInputRPM, pidOutputPWM;
-double Kp = .125, Ki = .25, Kd = .1;
+
+double Kp = .05, Ki = .075, Kd = .01;
+
 PID motorPID(&pidInputRPM, &pidOutputPWM, &pidSetpoint, Kp, Ki, Kd, DIRECT);
 
 /////////////////////////////////////////////////////////////////////////////
@@ -185,9 +190,9 @@ void PlaySound(Tone t)
   }
   else if (t == Tone::RpmReached)
   {
-     tone(PIN_BUZZER, 880, 100);  
-     delay(200);
-     tone(PIN_BUZZER, 880, 100); 
+    tone(PIN_BUZZER, 880, 100);
+    delay(200);
+    tone(PIN_BUZZER, 880, 100);
   }
   else if (t == Tone::StoppedWindingSuccess)
   {
@@ -206,10 +211,10 @@ void PlaySound(Tone t)
   }
 }
 
-int MotorRpm()
+int MotorRpm(unsigned long timeDeltaUs)
 {
   // Calculate motor RPM from delta time between rotational sensors.
-  return (1.0 / (rotationDeltaRunningMedian.getAverage() * 2.0)) * 1000.0 * 1000.0 * 60.0;
+  return (1.0 / (timeDeltaUs * 2.0)) * 1000.0 * 1000.0 * 60.0;
 }
 
 void SetIndexPosition(float pos)
@@ -502,7 +507,7 @@ void UpdateLCD()
       sprintf(buf, "%u of %u", rotationCount, windingCount);
     else
     {
-      sprintf(buf, "%u RPM", MotorRpm());
+      sprintf(buf, "%u RPM", MotorRpm(rotationDeltaRunningMedian.getAverage()));
     }
 
     PrintLine(1, buf);
@@ -525,25 +530,19 @@ void StateWinding(bool firstRunFlag)
 {
   static unsigned long motorIncrementPwmMillis = 0;
   static bool accelerationPhase = true;
-  static int motorRpm;
+  static bool playRpmReachedToneFlag;
 
   int posBottom = indexBottom / stepperTravelPerSteps;
   int posTop = indexTop / stepperTravelPerSteps;
 
-  // TEMP
+  // Output debug motor values.
   static unsigned long start = millis();
   if (millis() - start > 250)
   {
     start = millis();
-    Serial.print(MotorRpm());
-    Serial.print(" | ");
-    Serial.print(windingSpeedRpm);
-    Serial.print(" | ");
-    //Serial.print(motorPwm);
-    Serial.print(" | ");
-    Serial.print(pidOutputPWM);
-    Serial.print(" | ");
-    Serial.println(pidSetpoint);
+    char buf[128];
+    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i", MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), windingSpeedRpm, int(pidOutputPWM));
+    Serial.println(buf);
   }
 
   // Prepare variables and hardware for winding.
@@ -552,8 +551,10 @@ void StateWinding(bool firstRunFlag)
     rotationCount = 0;
     motorIncrementPwmMillis = millis();
     accelerationPhase = true;
+    skipReadingsCount = 0;
     rotationDeltaRunningMedian.clear();
-    motorRpm = motorStartRPM;
+    pidSetpoint = motorStartRPM;
+    playRpmReachedToneFlag = true;
 
     if (windingDirection == 0)
     {
@@ -565,31 +566,38 @@ void StateWinding(bool firstRunFlag)
       digitalWrite(PIN_MOTOR_IN1, LOW);
       digitalWrite(PIN_MOTOR_IN2, HIGH);
     }
+
+    analogWrite(PIN_MOTOR_PWM, motorPwmMin);
   }
 
   // Accelerate motor until target RPM is reached.
   if (accelerationPhase)
-  {   
+  {
     if (millis() - motorIncrementPwmMillis > motorIncrementPwmDelay)
     {
       motorIncrementPwmMillis = millis();
-      if (motorRpm < windingSpeedRpm)
+
+      const int setPointRpmIncrement = 5;
+      if (pidSetpoint <= windingSpeedRpm - setPointRpmIncrement)
       {
-        motorRpm++;
-        pidSetpoint = motorRpm; 
+        pidSetpoint += setPointRpmIncrement;
       }
       else
       {
-        PlaySound(Tone::RpmReached);
         accelerationPhase = false;
       }
     }
   }
 
-  // Motor PID controller.
-  pidInputRPM = MotorRpm();
-  motorPID.Compute();
-  analogWrite(PIN_MOTOR_PWM, pidOutputPWM);
+  // Play tone once when motor RPM reaches target RPM.
+  if (playRpmReachedToneFlag)
+  {
+    if (MotorRpm(rotationDeltaRunningMedian.getAverage()) >= windingSpeedRpm)
+    {
+      playRpmReachedToneFlag = false;
+      PlaySound(Tone::RpmReached);
+    }
+  }
 
   // Move indexer up and down.
   if (stepper.currentPosition() == posTop)
@@ -666,14 +674,24 @@ bool HomeIndexerStepper()
   return indexSuccessFlag;
 }
 
-// Interrupt callback.
+// Callback when hall effect sensor triggers event on pin interupt.
 void CountRotation()
 {
   static unsigned long prevMicros;
-  rotationDeltaRunningMedian.add(micros() - prevMicros);
-  prevMicros = micros();
 
-  // Two pulses per rotation.
+  if (state == State::Winding)
+  {
+    // Motor PID controller.
+    unsigned long rotationDeltaTimeInstanious = micros() - prevMicros;
+    rotationDeltaRunningMedian.add(rotationDeltaTimeInstanious);
+    //int instaniousRpm = (1.0 / (rotationDeltaTimeInstanious * 2.0)) * 1000.0 * 1000.0 * 60.0;
+    pidInputRPM = MotorRpm(rotationDeltaTimeInstanious);
+    motorPID.Compute();
+    analogWrite(PIN_MOTOR_PWM, pidOutputPWM);
+    prevMicros = micros();
+  }
+
+   // Save rotation count (two pulses per rotation).
   static bool countToggle = true;
   countToggle = !countToggle;
   if (countToggle)
@@ -726,6 +744,7 @@ void setup()
 
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_EFFECT_SENSOR), CountRotation, FALLING);
 
+  /*
   if (HomeIndexerStepper() == false)
   {
     PrintLine(0, "Stepper failed");
@@ -738,8 +757,9 @@ void setup()
   {
     PlaySound(Tone::StepperHomeSuccess);
   }
+  */
 
-  motorPID.SetOutputLimits(64, 255);
+  motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
   motorPID.SetMode(AUTOMATIC);
 
   // Setup timer for stepper motor tick.
