@@ -14,7 +14,7 @@
     
 
   To Do:
-    No motor RPM detected timeout.
+    Add no motor RPM detected timeout.
 
 
   HISTORY
@@ -25,14 +25,15 @@
 
 */
 
-#include <Arduino.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C
-#include <AccelStepper.h>       // https://github.com/waspinator/AccelStepper
-#include <JC_Button.h>          // https://github.com/JChristensen/JC_Button
-#include <TimerOne.h>           // https://playground.arduino.cc/Code/Timer1/
-#include <PID_v1.h>             // https://github.com/br3ttb/Arduino-PID-Library
-#include <RunningMedian.h>      // https://github.com/RobTillaart/RunningMedian
+#include <Arduino.h>           // Built-in.
+#include <Wire.h>              // Built-in.
+#include <EEPROM.h>            // Built-in.
+#include <LiquidCrystal_I2C.h> // https://github.com/johnrickman/LiquidCrystal_I2C
+#include <AccelStepper.h>      // https://github.com/waspinator/AccelStepper
+#include <JC_Button.h>         // https://github.com/JChristensen/JC_Button
+#include <TimerOne.h>          // https://playground.arduino.cc/Code/Timer1/
+#include <PID_v1.h>            // https://github.com/br3ttb/Arduino-PID-Library
+#include <RunningMedian.h>     // https://github.com/RobTillaart/RunningMedian
 
 #define PIN_STEPPER_DRIVER_STEP 13
 #define PIN_STEPPER_DRIVER_DIR 4
@@ -55,80 +56,21 @@
 
 #define BUTTON_ACTIVE 0
 
-
-
-enum class State
-{
-  Standby,
-  Winding,
-  Pause,
-  Stop
-};
-
-State state = State::Standby;
-
-enum class MenuItem
-{
-  Home,
-  WindCount,
-  WindSpeed,
-  WindDirection,
-  IndexSpeed,
-  IndexTop,
-  IndexBottom,
-  PlaySounds,
-  Count
-};
-
-
-// Menu configurable variables.
-int windingCount = 1000;
-int windingSpeedRpm = 1000;
-int windingDirection;
-int indexSpeed;
-double indexTop = 0.25;
-double indexBottom = 0.0;
-bool playSounds = true;
-
-const int windingSpeedRpmMin = 300;
-const int windingSpeedRpmMax = 1000;
-const int indexSpeedRpmMin = 10;
-const int indexSpeedRpmMax = 100;
-
-// Running variables.
-
-
-int menuSelect = int(MenuItem::WindCount);
-
-const int buttonToneLengthMs = 20;
-
-enum class Tone
-{
-  StepperHomeSuccess,
-  StepperHomeFailed,
-  MenuPrevious,
-  MenuNext,
-  OptionDecrement,
-  OptionIncrement,
-  RpmReached,
-  StoppedWindingSuccess,
-  StoppedWinding
-};
-
 // Stepper.
 // Indexer lead screw is 2mm travel per turn (0.0787402 inches).
 // 0.0787402 / 400 = 0.0001968505 per step (at 1/2 step microstepping)
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
-const float stepperTravelPerSteps = 0.0001968505; // Inches.
-const float indexUserIncrement = 0.050; // Inches.
-const float indexMaxPosition = 1.5; // Inches. Determined by machine physical travel limit.
-const float indexMinPosition = 0; // Inches.
-double indexPosition = 0.0; // Inches from homed position.
+const double stepperTravelPerSteps = 0.0001968505; // Inches.
+const double indexUserIncrement = 0.050;           // Inches.
+const double indexPositionMax = 1.5;               // Inches. Determined by machine physical travel limit.
+const double indexPositionMin = 0;                 // Inches.
+double indexPosition = 0.0;                        // Inches from homed position.
 
 // DC Motor.
 const int motorPwmMin = 64;
 const int motorPwmMax = 255;
 const int motorIncrementPwmDelay = 50; // milliseconds.
+const int setPointRpmIncrement = 5;
 volatile int skipReadingsCount;
 const int skipReadingsNum = 2;
 volatile int rotationCount;
@@ -144,18 +86,81 @@ Button buttonMenuPrevious(PIN_BUTTON_MENU_PREVIOUS);
 Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
 Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
 Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
+const int buttonToneLengthMs = 20;
 
 // Display.
 LiquidCrystal_I2C lcd(0x27, 20, 2);
 const int toggleDisplayDelay = 2000;
 
+// Main state.
+enum class State
+{
+  Standby,
+  Winding,
+  Pause,
+  Stop
+};
+State state = State::Standby;
+
+enum class MenuItem
+{
+  Home,
+  WindCount,
+  WindSpeed,
+  WindDirection,
+  IndexSpeed,
+  IndexTop,
+  IndexBottom,
+  PlaySounds,
+  Count
+};
+
+// User params.
+struct UserParams
+{
+  unsigned int windingCount = 1000;
+  int windingSpeedRpm = 1000;
+  int windingDirection;
+  int indexSpeed;
+  double indexTop = 0.25;
+  double indexBottom = 0.0;
+  bool playSounds = true;
+} userParams;
+
+// User params min/max values.
+const unsigned int windingCountMin = 10;
+const unsigned int windingCountMax = 60000;
+const int windingSpeedRpmMin = 300;
+const int windingSpeedRpmMax = 1000;
+const double indexTopMin = indexPositionMin;
+const double indexTopMax = indexPositionMax;
+const double indexBottomMin = indexPositionMin;
+const double indexBottomMax = indexPositionMax;
+const int indexSpeedRpmMin = 10;
+const int indexSpeedRpmMax = 100;
+
+int menuSelect = int(MenuItem::WindCount);
+
+// Tones.
+enum class Tone
+{
+  StepperHomeSuccess,
+  StepperHomeFailed,
+  MenuPrevious,
+  MenuNext,
+  OptionDecrement,
+  OptionIncrement,
+  RpmReached,
+  StoppedWindingSuccess,
+  StoppedWinding
+};
 
 /////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
 
 void PlaySound(Tone t)
 {
-  if (!playSounds)
+  if (!userParams.playSounds)
   {
     return;
   }
@@ -218,6 +223,7 @@ void PlaySound(Tone t)
 int MotorRpm(unsigned long timeDeltaUs)
 {
   // Calculate motor RPM from delta time between rotational sensors.
+  // 1 / ((timeDelta in microseconds between sensor trigger) * (two sensors triggers per rotation)) * (1000 us/ms) *  (1000 ms/s) * (60 s/min)
   return (1.0 / (timeDeltaUs * 2.0)) * 1000.0 * 1000.0 * 60.0;
 }
 
@@ -226,9 +232,41 @@ void SetIndexPosition(float pos)
   stepper.moveTo(pos / stepperTravelPerSteps);
 }
 
+void LoadUserParams()
+{
+  EEPROM.get(0, userParams);
+
+  // Load default value if saved value is out of range (will happen for first time retrieval);
+  if (userParams.windingCount < windingCountMin || userParams.windingCount > windingCountMax)
+    userParams.windingCount = windingCountMin;
+
+  if (userParams.windingSpeedRpm < windingSpeedRpmMin || userParams.windingSpeedRpm > windingSpeedRpmMax)
+    userParams.windingSpeedRpm = windingSpeedRpmMin;
+
+  if (userParams.windingDirection != 0 || userParams.windingDirection != 1)
+    userParams.windingDirection = 0;
+
+  if (userParams.indexSpeed < indexSpeedRpmMin || userParams.indexSpeed > indexSpeedRpmMax)
+    userParams.indexSpeed = indexSpeedRpmMin;
+
+  if (userParams.indexTop < indexTopMin || userParams.indexTop > indexTopMax ||isnan(userParams.indexTop))
+    userParams.indexTop = indexTopMin;
+
+  if (userParams.indexBottom < indexBottomMin || userParams.indexBottom > indexBottomMax || isnan(userParams.indexBottom))
+    userParams.indexBottom = indexBottomMin;
+
+  if (userParams.playSounds != true || userParams.playSounds != false)
+    userParams.playSounds = true;
+}
+
+void SaveUserParams()
+{
+  // Note: put() only writes data if the data has changed.
+  EEPROM.put(0, userParams);
+}
+
 void CheckControlButtons()
 {
-
   static unsigned long startHeldCount;
   static unsigned long pauseHeldCount;
   static unsigned long stopHeldCount;
@@ -278,7 +316,6 @@ void CheckControlButtons()
 
 void CheckMenuButtons()
 {
-
   buttonMenuPrevious.read();
   buttonMenuNext.read();
   buttonOptionDecrement.read();
@@ -318,52 +355,52 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (windingCount > 10)
+      if (userParams.windingCount > windingCountMin)
       {
-        windingCount -= 10;
+        userParams.windingCount -= 10;
       }
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      if (windingSpeedRpm >= windingSpeedRpmMin + 10)
+      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + 10)
       {
-        windingSpeedRpm -= 10;
+        userParams.windingSpeedRpm -= 10;
       }
     }
     else if (menuSelect == int(MenuItem::WindDirection))
     {
-      if (windingDirection == 0)
-        windingDirection = 1;
+      if (userParams.windingDirection == 0)
+        userParams.windingDirection = 1;
       else
-        windingDirection = 0;
+        userParams.windingDirection = 0;
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
-      if (indexSpeed >= indexSpeedRpmMin + 10)
+      if (userParams.indexSpeed >= indexSpeedRpmMin + 10)
       {
-        indexSpeed -= 10;
+        userParams.indexSpeed -= 10;
       }
     }
     else if (menuSelect == int(MenuItem::IndexTop))
     {
-      indexTop -= indexUserIncrement;
-      if (indexTop < 0)
-        indexTop = 0;
-      SetIndexPosition(indexTop);
+      userParams.indexTop -= indexUserIncrement;
+      if (userParams.indexTop < 0)
+        userParams.indexTop = 0;
+      SetIndexPosition(userParams.indexTop);
     }
     else if (menuSelect == int(MenuItem::IndexBottom))
     {
-      indexBottom -= indexUserIncrement;
-      if (indexBottom < 0)
-        indexBottom = 0;
-      SetIndexPosition(indexBottom);
+      userParams.indexBottom -= indexUserIncrement;
+      if (userParams.indexBottom < 0)
+        userParams.indexBottom = 0;
+      SetIndexPosition(userParams.indexBottom);
     }
     else if (menuSelect == int(MenuItem::PlaySounds))
     {
-      if (playSounds)
-        playSounds = false;
+      if (userParams.playSounds)
+        userParams.playSounds = false;
       else
-        playSounds = true;
+        userParams.playSounds = true;
     }
     PlaySound(Tone::OptionDecrement);
   }
@@ -373,49 +410,52 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      windingCount += 10;
+      if (userParams.windingCount <= windingCountMax - 10)
+      {
+        userParams.windingCount += 10;
+      }
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      if (windingSpeedRpm <= windingSpeedRpmMax - 10)
+      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - 10)
       {
-        windingSpeedRpm += 10;
+        userParams.windingSpeedRpm += 10;
       }
     }
     else if (menuSelect == int(MenuItem::WindDirection))
     {
-      if (windingDirection == 0)
-        windingDirection = 1;
+      if (userParams.windingDirection == 0)
+        userParams.windingDirection = 1;
       else
-        windingDirection = 0;
+        userParams.windingDirection = 0;
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
-      if (indexSpeed <= indexSpeedRpmMax - 10)
+      if (userParams.indexSpeed <= indexSpeedRpmMax - 10)
       {
-        indexSpeed += 10;
+        userParams.indexSpeed += 10;
       }
     }
     else if (menuSelect == int(MenuItem::IndexTop))
     {
-      indexTop += indexUserIncrement;
-      if (indexTop > indexMaxPosition)
-        indexTop = indexMaxPosition;
-      SetIndexPosition(indexTop);
+      userParams.indexTop += indexUserIncrement;
+      if (userParams.indexTop > indexPositionMax)
+        userParams.indexTop = indexPositionMax;
+      SetIndexPosition(userParams.indexTop);
     }
     else if (menuSelect == int(MenuItem::IndexBottom))
     {
-      indexBottom += indexUserIncrement;
-      if (indexBottom > indexMaxPosition)
-        indexBottom = indexMaxPosition;
-      SetIndexPosition(indexBottom);
+      userParams.indexBottom += indexUserIncrement;
+      if (userParams.indexBottom > indexPositionMax)
+        userParams.indexBottom = indexPositionMax;
+      SetIndexPosition(userParams.indexBottom);
     }
     else if (menuSelect == int(MenuItem::PlaySounds))
     {
-      if (playSounds)
-        playSounds = false;
+      if (userParams.playSounds)
+        userParams.playSounds = false;
       else
-        playSounds = true;
+        userParams.playSounds = true;
     }
     PlaySound(Tone::OptionIncrement);
   }
@@ -460,45 +500,45 @@ void UpdateLCD()
     else if (menuSelect == int(MenuItem::WindCount))
     {
       PrintLine(0, "Count:");
-      sprintf(buf, "%u Rotations", windingCount);
+      sprintf(buf, "%u Rotations", userParams.windingCount);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
       PrintLine(0, "Speed:");
-      sprintf(buf, "%u RPM", windingSpeedRpm);
+      sprintf(buf, "%u RPM", userParams.windingSpeedRpm);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::WindDirection))
     {
       PrintLine(0, "Direction:");
-      if (windingDirection == 0)
+      if (userParams.windingDirection == 0)
         PrintLine(1, "CC");
-      else if (windingDirection == 1)
+      else if (userParams.windingDirection == 1)
         PrintLine(1, "CCW");
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
       PrintLine(0, "Index Speed:");
-      sprintf(buf, "%u RPM", indexSpeed);
+      sprintf(buf, "%u RPM", userParams.indexSpeed);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::IndexTop))
     {
       PrintLine(0, "Index Top:");
-      sprintf(buf, dtostrf(indexTop, 5, 3, "%5.3f"));
+      sprintf(buf, dtostrf(userParams.indexTop, 5, 3, "%5.3f"));
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::IndexBottom))
     {
       PrintLine(0, "Index Bottom:");
-      sprintf(buf, dtostrf(indexBottom, 5, 3, "%5.3f"));
+      sprintf(buf, dtostrf(userParams.indexBottom, 5, 3, "%5.3f"));
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::PlaySounds))
     {
       PrintLine(0, "Play sounds:");
-      if (playSounds)
+      if (userParams.playSounds)
         PrintLine(1, "Yes");
       else
         PrintLine(1, "No");
@@ -508,7 +548,7 @@ void UpdateLCD()
   {
     PrintLine(0, "Winding...");
     if (toggleDisplay)
-      sprintf(buf, "%u of %u", rotationCount, windingCount);
+      sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
     else
     {
       sprintf(buf, "%u RPM", MotorRpm(rotationDeltaRunningMedian.getAverage()));
@@ -519,13 +559,13 @@ void UpdateLCD()
   else if (state == State::Pause)
   {
     PrintLine(0, "Winding paused.");
-    sprintf(buf, "%u of %u", rotationCount, windingCount);
+    sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
     PrintLine(1, buf);
   }
   else if (state == State::Stop)
   {
     PrintLine(0, "Winding stoped.");
-    sprintf(buf, "%u of %u", rotationCount, windingCount);
+    sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
     PrintLine(1, buf);
   }
 }
@@ -533,11 +573,11 @@ void UpdateLCD()
 void StateWinding(bool firstRunFlag)
 {
   static unsigned long motorIncrementPwmMillis = 0;
-  static bool accelerationPhase = true;
+  static bool accelerationPhaseFlag = true;
   static bool playRpmReachedToneFlag;
 
-  int posBottom = indexBottom / stepperTravelPerSteps;
-  int posTop = indexTop / stepperTravelPerSteps;
+  int posBottom = userParams.indexBottom / stepperTravelPerSteps;
+  int posTop = userParams.indexTop / stepperTravelPerSteps;
 
   // Output debug motor values.
   static unsigned long start = millis();
@@ -545,7 +585,7 @@ void StateWinding(bool firstRunFlag)
   {
     start = millis();
     char buf[128];
-    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i", MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), windingSpeedRpm, int(pidOutputPWM));
+    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i", MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), userParams.windingSpeedRpm, int(pidOutputPWM));
     Serial.println(buf);
   }
 
@@ -554,18 +594,18 @@ void StateWinding(bool firstRunFlag)
   {
     rotationCount = 0;
     motorIncrementPwmMillis = millis();
-    accelerationPhase = true;
+    accelerationPhaseFlag = true;
     skipReadingsCount = 0;
     rotationDeltaRunningMedian.clear();
 
     playRpmReachedToneFlag = true;
 
-    if (windingDirection == 0)
+    if (userParams.windingDirection == 0)
     {
       digitalWrite(PIN_MOTOR_IN1, HIGH);
       digitalWrite(PIN_MOTOR_IN2, LOW);
     }
-    else if (windingDirection == 1)
+    else if (userParams.windingDirection == 1)
     {
       digitalWrite(PIN_MOTOR_IN1, LOW);
       digitalWrite(PIN_MOTOR_IN2, HIGH);
@@ -575,20 +615,19 @@ void StateWinding(bool firstRunFlag)
   }
 
   // Accelerate motor until target RPM is reached.
-  if (accelerationPhase)
+  if (accelerationPhaseFlag)
   {
     if (millis() - motorIncrementPwmMillis > motorIncrementPwmDelay)
     {
       motorIncrementPwmMillis = millis();
 
-      const int setPointRpmIncrement = 5;
-      if (pidSetpoint <= windingSpeedRpm - setPointRpmIncrement)
+      if (pidSetpoint <= userParams.windingSpeedRpm - setPointRpmIncrement)
       {
         pidSetpoint += setPointRpmIncrement;
       }
       else
       {
-        accelerationPhase = false;
+        accelerationPhaseFlag = false;
       }
     }
   }
@@ -596,7 +635,7 @@ void StateWinding(bool firstRunFlag)
   // Play tone once when motor RPM reaches target RPM.
   if (playRpmReachedToneFlag)
   {
-    if (MotorRpm(rotationDeltaRunningMedian.getAverage()) >= windingSpeedRpm)
+    if (MotorRpm(rotationDeltaRunningMedian.getAverage()) >= userParams.windingSpeedRpm)
     {
       playRpmReachedToneFlag = false;
       PlaySound(Tone::RpmReached);
@@ -618,7 +657,7 @@ void StateWinding(bool firstRunFlag)
   }
 
   // Check for final conditions.
-  if (rotationCount >= windingCount)
+  if (rotationCount >= userParams.windingCount)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
     PlaySound(Tone::StoppedWindingSuccess);
@@ -650,13 +689,13 @@ void StateController()
   previousState = state;
 }
 
-// Call prior to enabling tick interrupt.
+// Call prior to enabling stepper tick interrupt.
 bool HomeIndexerStepper()
 {
   PrintLine(0, "Homing stepper");
 
   stepper.setCurrentPosition(0);
-  stepper.moveTo(-(indexMaxPosition / stepperTravelPerSteps));
+  stepper.moveTo(-(indexPositionMax / stepperTravelPerSteps));
 
   bool indexSuccessFlag = false;
 
@@ -673,6 +712,19 @@ bool HomeIndexerStepper()
       break;
     }
     stepper.run();
+  }
+
+  if (indexSuccessFlag == false)
+  {
+    PrintLine(0, "Stepper failed");
+    PrintLine(1, "to home!");
+    PlaySound(Tone::StepperHomeFailed);
+    while (true)
+      ;
+  }
+  else
+  {
+    PlaySound(Tone::StepperHomeSuccess);
   }
 
   return indexSuccessFlag;
@@ -695,7 +747,7 @@ void CountRotation()
     prevMicros = micros();
   }
 
-   // Save rotation count (two pulses per rotation).
+  // Save rotation count (two pulses per rotation).
   static bool countToggle = true;
   countToggle = !countToggle;
   if (countToggle)
@@ -746,22 +798,11 @@ void setup()
   buttonOptionDecrement.begin();
   buttonOptionIncrement.begin();
 
+  LoadUserParams();
+
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_EFFECT_SENSOR), CountRotation, FALLING);
 
-  /*
-  if (HomeIndexerStepper() == false)
-  {
-    PrintLine(0, "Stepper failed");
-    PrintLine(1, "to home!");
-    PlaySound(Tone::StepperHomeFailed);
-    while (true)
-      ;
-  }
-  else
-  {
-    PlaySound(Tone::StepperHomeSuccess);
-  }
-  */
+  HomeIndexerStepper();
 
   motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
   motorPID.SetMode(AUTOMATIC);
@@ -783,4 +824,6 @@ void loop()
   CheckMenuButtons();
 
   UpdateLCD(); // ~52ms processing time.
+
+  SaveUserParams();
 }
