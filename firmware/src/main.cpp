@@ -61,8 +61,8 @@
 // 0.0787402 / 400 = 0.0001968505 per step (at 1/2 step microstepping)
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
 const double stepperTravelPerSteps = 0.0001968505; // Inches.
-const double indexUserIncrement = 0.050;           // Inches.
-const double indexPositionMax = 1.5;               // Inches. Determined by machine physical travel limit.
+const double indexUserIncrement = 0.025;           // Inches.
+const double indexPositionMax = 2.300;             // Inches. Determined by machine physical travel limit.
 const double indexPositionMin = 0;                 // Inches.
 double indexPosition = 0.0;                        // Inches from homed position.
 
@@ -71,7 +71,6 @@ const int motorPwmMin = 64;
 const int motorPwmMax = 255;
 const int motorIncrementPwmDelay = 50; // milliseconds.
 const int setPointRpmIncrement = 5;
-volatile int skipReadingsCount;
 const int skipReadingsNum = 2;
 volatile int rotationCount;
 RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
@@ -87,6 +86,9 @@ Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
 Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
 Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
 const int buttonToneLengthMs = 20;
+const int holdToStartSec = 3;
+const int holdToStopSec = 3;
+const int buttonAnalogActiveThreshold = 10;
 
 // Display.
 LiquidCrystal_I2C lcd(0x27, 20, 2);
@@ -155,8 +157,32 @@ enum class Tone
   StoppedWinding
 };
 
+// LEDs.
+enum class LED
+{
+  Start,
+  Pause,
+  Stop
+};
+
 /////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
+
+void SetLED(LED led, bool state)
+{
+  if (led == LED::Start)
+  {
+    analogWrite(PIN_LED_START, state ? 127 : 0);
+  }
+  else if (led == LED::Pause)
+  {
+    analogWrite(PIN_LED_PAUSE, state ? 127 : 0);
+  }
+  else if (led == LED::Stop)
+  {
+    analogWrite(PIN_LED_STOP, state ? 127 : 0);
+  }
+}
 
 void PlaySound(Tone t)
 {
@@ -220,6 +246,23 @@ void PlaySound(Tone t)
   }
 }
 
+// Print string to LCD with trailing spaces to fill/clear the row.
+void PrintLine(int line, const char str[])
+{
+  if (line == 0)
+  {
+    lcd.setCursor(0, 0);
+  }
+  else
+  {
+    lcd.setCursor(0, 1);
+  }
+
+  char buf[32];
+  sprintf(buf, "%-16s", str);
+  lcd.printstr(buf);
+}
+
 int MotorRpm(unsigned long timeDeltaUs)
 {
   // Calculate motor RPM from delta time between rotational sensors.
@@ -249,7 +292,7 @@ void LoadUserParams()
   if (userParams.indexSpeed < indexSpeedRpmMin || userParams.indexSpeed > indexSpeedRpmMax)
     userParams.indexSpeed = indexSpeedRpmMin;
 
-  if (userParams.indexTop < indexTopMin || userParams.indexTop > indexTopMax ||isnan(userParams.indexTop))
+  if (userParams.indexTop < indexTopMin || userParams.indexTop > indexTopMax || isnan(userParams.indexTop))
     userParams.indexTop = indexTopMin;
 
   if (userParams.indexBottom < indexBottomMin || userParams.indexBottom > indexBottomMax || isnan(userParams.indexBottom))
@@ -265,53 +308,104 @@ void SaveUserParams()
   EEPROM.put(0, userParams);
 }
 
-void CheckControlButtons()
+bool CheckControlButtons()
 {
   static unsigned long startHeldCount;
   static unsigned long pauseHeldCount;
   static unsigned long stopHeldCount;
+  static bool startReleasedFlag;
+  static bool pauseReleasedFlag;
+  static bool stopReleasedFlag;
 
-  if (analogRead(PIN_BUTTON_START) == 0)
+  bool buttonHeldFlag = false;
+
+  // Start button.
+  if (analogRead(PIN_BUTTON_START) < buttonAnalogActiveThreshold)
   {
-    if (millis() - startHeldCount > 100)
+    if (state == State::Standby)
     {
-      state = State::Winding;
+      if (millis() - startHeldCount >= holdToStartSec * 1000)
+      {
+        state = State::Winding;
+      }
+      else if (millis() - startHeldCount > 100)
+      {
+        PrintLine(0, "Hold button");
+        char buf[20];
+        sprintf(buf, "to start.    (%u)", holdToStartSec - (millis() - startHeldCount) / 1000);
+        PrintLine(1, buf);
+
+        buttonHeldFlag = true;
+      }
+      SetLED(LED::Start, HIGH);
     }
-    digitalWrite(PIN_LED_START, HIGH);
   }
   else
   {
-    digitalWrite(PIN_LED_START, LOW);
+    SetLED(LED::Start, LOW);
     startHeldCount = millis();
   }
 
-  if (analogRead(PIN_BUTTON_PAUSE) == 0)
+  // Pause button.
+  if (analogRead(PIN_BUTTON_PAUSE) < buttonAnalogActiveThreshold)
   {
-    if (millis() - pauseHeldCount > 100)
+    if (state == State::Winding || state == State::Pause)
     {
-      state = State::Pause;
+      if (millis() - pauseHeldCount > 100)
+      {
+        if (pauseReleasedFlag)
+        {
+          pauseReleasedFlag = false;
+          if (state == State::Winding)
+          {
+            state = State::Pause;
+          }
+          else if (state == State::Pause)
+          {
+            state = State::Winding;
+          }
+        }
+      }
+      SetLED(LED::Pause, HIGH);
     }
-    digitalWrite(PIN_LED_PAUSE, HIGH);
   }
   else
   {
-    digitalWrite(PIN_LED_PAUSE, LOW);
+    SetLED(LED::Pause, LOW);
     pauseHeldCount = millis();
+    pauseReleasedFlag = true;
   }
 
-  if (analogRead(PIN_BUTTON_STOP) == 0)
+  // Stop button.
+  if (analogRead(PIN_BUTTON_STOP) < buttonAnalogActiveThreshold)
   {
-    if (millis() - stopHeldCount > 100)
+    if (state == State::Pause || state == State::Winding)
     {
-      state = State::Stop;
+      state = State::Pause;
+
+      if (millis() - stopHeldCount >= holdToStopSec * 1000)
+      {
+        state = State::Stop;
+      }
+      else if (millis() - stopHeldCount > 100)
+      {
+        PrintLine(0, "Hold button");
+        char buf[20];
+        sprintf(buf, "to stop.     (%u)", holdToStopSec - (millis() - stopHeldCount) / 1000);
+        PrintLine(1, buf);
+
+        buttonHeldFlag = true;
+      }
+      SetLED(LED::Stop, HIGH);
     }
-    digitalWrite(PIN_LED_STOP, HIGH);
   }
   else
   {
-    digitalWrite(PIN_LED_STOP, LOW);
+    SetLED(LED::Stop, LOW);
     stopHeldCount = millis();
   }
+
+  return buttonHeldFlag;
 }
 
 void CheckMenuButtons()
@@ -355,7 +449,7 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount > windingCountMin)
+      if (userParams.windingCount >= windingCountMin + 10)
       {
         userParams.windingCount -= 10;
       }
@@ -459,23 +553,30 @@ void CheckMenuButtons()
     }
     PlaySound(Tone::OptionIncrement);
   }
-}
 
-// Print string to LCD with trailing spaces to fill/clear the row.
-void PrintLine(int line, const char str[])
-{
-  if (line == 0)
+  // Option decrement held down.
+  if (buttonOptionDecrement.pressedFor(500))
   {
-    lcd.setCursor(0, 0);
-  }
-  else
-  {
-    lcd.setCursor(0, 1);
+    if (menuSelect == int(MenuItem::WindCount))
+    {
+      if (userParams.windingCount >= windingCountMin + 100)
+      {
+        userParams.windingCount -= 100;
+      }
+    }
   }
 
-  char buf[32];
-  sprintf(buf, "%-16s", str);
-  lcd.printstr(buf);
+  // Option increment held down.
+  if (buttonOptionIncrement.pressedFor(500))
+  {
+    if (menuSelect == int(MenuItem::WindCount))
+    {
+      if (userParams.windingCount <= windingCountMax - 100)
+      {
+        userParams.windingCount += 100;
+      }
+    }
+  }
 }
 
 void UpdateLCD()
@@ -589,15 +690,12 @@ void StateWinding(bool firstRunFlag)
     Serial.println(buf);
   }
 
-  // Prepare variables and hardware for winding.
+  // Prepare variables and hardware for motor startup.
   if (firstRunFlag)
   {
-    rotationCount = 0;
     motorIncrementPwmMillis = millis();
     accelerationPhaseFlag = true;
-    skipReadingsCount = 0;
     rotationDeltaRunningMedian.clear();
-
     playRpmReachedToneFlag = true;
 
     if (userParams.windingDirection == 0)
@@ -667,26 +765,31 @@ void StateWinding(bool firstRunFlag)
 
 void StateController()
 {
-  static State previousState = State::Standby;
+
+  static bool resetWindingStateFlag = true;
 
   if (state == State::Standby)
   {
+    rotationCount = 0;
+    resetWindingStateFlag = true;
   }
   else if (state == State::Winding)
   {
-    StateWinding(previousState != State::Winding);
+    StateWinding(resetWindingStateFlag);
+    resetWindingStateFlag = false;
   }
   else if (state == State::Pause)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
+    stepper.stop();
+    resetWindingStateFlag = true;
   }
   else if (state == State::Stop)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
+    stepper.stop();
     state = State::Standby;
   }
-
-  previousState = state;
 }
 
 // Call prior to enabling stepper tick interrupt.
@@ -694,8 +797,9 @@ bool HomeIndexerStepper()
 {
   PrintLine(0, "Homing stepper");
 
+  // Move stepper down physical range (+10%) in order to hit the limit switch.
   stepper.setCurrentPosition(0);
-  stepper.moveTo(-(indexPositionMax / stepperTravelPerSteps));
+  stepper.moveTo(-((indexPositionMax + (indexPositionMax * 0.10)) / stepperTravelPerSteps));
 
   bool indexSuccessFlag = false;
 
@@ -819,11 +923,12 @@ void loop()
 {
   StateController();
 
-  CheckControlButtons();
-
   CheckMenuButtons();
 
-  UpdateLCD(); // ~52ms processing time.
+  bool controlButtonHeldFlag = CheckControlButtons();
+
+  if (!controlButtonHeldFlag)
+    UpdateLCD(); // ~52ms processing time.
 
   SaveUserParams();
 }
