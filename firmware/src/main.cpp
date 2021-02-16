@@ -61,10 +61,19 @@
 // 0.0787402 / 400 = 0.0001968505 per step (at 1/2 step microstepping)
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
 const double stepperTravelPerSteps = 0.0001968505; // Inches.
-const double indexUserIncrement = 0.025;           // Inches.
-const double indexPositionMax = 2.300;             // Inches. Determined by machine physical travel limit.
-const double indexPositionMin = 0;                 // Inches.
-double indexPosition = 0.0;                        // Inches from homed position.
+const double indexPositionUserIncrement = 0.025;   // Inches.
+const float indexPositionUserIncrementHeld = .100;
+const unsigned int indexRpmUserIncrement = 10;
+const unsigned int indexRpmUserIncrementHeld = 10;
+const double indexPositionMax = 2.300; // Inches. Determined by machine physical travel limit.
+const double indexPositionMin = 0;     // Inches.
+const unsigned int indexSpeedRpmMin = 10;
+const unsigned int indexSpeedRpmMax = 100;
+double indexPosition = 0.0; // Inches from homed position.
+const double indexTopMin = indexPositionMin;
+const double indexTopMax = indexPositionMax;
+const double indexBottomMin = indexPositionMin;
+const double indexBottomMax = indexPositionMax;
 
 // DC Motor.
 const unsigned int motorPwmMin = 64;
@@ -76,6 +85,16 @@ const unsigned int motorStartRpm = 300;
 volatile unsigned int rotationCount;
 volatile bool motorPIDStartupFlag;
 RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
+
+const unsigned int windingCountUserIncrement = 10;
+const unsigned int windingCountUserIncrementHeld = 100;
+const unsigned int windingRpmUserIncrement = 10;
+const unsigned int windingRpmUserIncrementHeld = 100;
+
+const unsigned int windingCountMin = 10;
+const unsigned int windingCountMax = 60000;
+const unsigned int windingSpeedRpmMin = 300;
+const unsigned int windingSpeedRpmMax = 1000;
 
 // Motor PID controller.
 double pidSetpoint, pidInputRPM, pidOutputPWM;
@@ -90,8 +109,7 @@ Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
 const unsigned int buttonToneLengthMs = 20;
 const unsigned int holdToStartSec = 3;
 const unsigned int holdToStopSec = 3;
-const int buttonAnalogActiveThreshold = 10;
-const unsigned int buttonHeldDelta = 100;
+const unsigned int buttonAnalogActiveThreshold = 10;
 const unsigned int buttonHeldDelayForMultipleIncrementMs = 500; // milliseconds.
 
 // Display.
@@ -132,18 +150,6 @@ struct UserParams
   double indexBottom = 0.0;
   bool playSounds = true;
 } userParams;
-
-// User params min/max values.
-const unsigned int windingCountMin = 10;
-const unsigned int windingCountMax = 60000;
-const unsigned int windingSpeedRpmMin = 300;
-const unsigned int windingSpeedRpmMax = 1000;
-const double indexTopMin = indexPositionMin;
-const double indexTopMax = indexPositionMax;
-const double indexBottomMin = indexPositionMin;
-const double indexBottomMax = indexPositionMax;
-const int indexSpeedRpmMin = 10;
-const int indexSpeedRpmMax = 100;
 
 int menuSelect = int(MenuItem::WindCount);
 
@@ -338,6 +344,7 @@ bool CheckControlButtons()
     {
       if (millis() - startHeldCount >= holdToStartSec * 1000)
       {
+        SaveUserParams();
         state = State::Winding;
       }
       else if (millis() - startHeldCount > 100)
@@ -461,16 +468,16 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount >= windingCountMin + 10)
+      if (userParams.windingCount >= windingCountMin + windingCountUserIncrement)
       {
-        userParams.windingCount -= 10;
+        userParams.windingCount -= windingCountUserIncrement;
       }
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + 10)
+      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrement)
       {
-        userParams.windingSpeedRpm -= 10;
+        userParams.windingSpeedRpm -= windingRpmUserIncrement;
       }
     }
     else if (menuSelect == int(MenuItem::WindDirection))
@@ -482,21 +489,21 @@ void CheckMenuButtons()
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
-      if (userParams.indexSpeed >= indexSpeedRpmMin + 10)
+      if (userParams.indexSpeed >= indexSpeedRpmMin + indexRpmUserIncrement)
       {
-        userParams.indexSpeed -= 10;
+        userParams.indexSpeed -= indexRpmUserIncrement;
       }
     }
     else if (menuSelect == int(MenuItem::IndexTop))
     {
-      userParams.indexTop -= indexUserIncrement;
+      userParams.indexTop -= indexPositionUserIncrement;
       if (userParams.indexTop < 0)
         userParams.indexTop = 0;
       SetIndexPosition(userParams.indexTop);
     }
     else if (menuSelect == int(MenuItem::IndexBottom))
     {
-      userParams.indexBottom -= indexUserIncrement;
+      userParams.indexBottom -= indexPositionUserIncrement;
       if (userParams.indexBottom < 0)
         userParams.indexBottom = 0;
       SetIndexPosition(userParams.indexBottom);
@@ -516,16 +523,16 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount <= windingCountMax - 10)
+      if (userParams.windingCount <= windingCountMax - windingSpeedRpmMin)
       {
-        userParams.windingCount += 10;
+        userParams.windingCount += windingCountUserIncrement;
       }
     }
     else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - 10)
+      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrement)
       {
-        userParams.windingSpeedRpm += 10;
+        userParams.windingSpeedRpm += windingRpmUserIncrement;
       }
     }
     else if (menuSelect == int(MenuItem::WindDirection))
@@ -537,21 +544,21 @@ void CheckMenuButtons()
     }
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
-      if (userParams.indexSpeed <= indexSpeedRpmMax - 10)
+      if (userParams.indexSpeed <= indexSpeedRpmMax - indexRpmUserIncrement)
       {
-        userParams.indexSpeed += 10;
+        userParams.indexSpeed += indexRpmUserIncrement;
       }
     }
     else if (menuSelect == int(MenuItem::IndexTop))
     {
-      userParams.indexTop += indexUserIncrement;
+      userParams.indexTop += indexPositionUserIncrement;
       if (userParams.indexTop > indexPositionMax)
         userParams.indexTop = indexPositionMax;
       SetIndexPosition(userParams.indexTop);
     }
     else if (menuSelect == int(MenuItem::IndexBottom))
     {
-      userParams.indexBottom += indexUserIncrement;
+      userParams.indexBottom += indexPositionUserIncrement;
       if (userParams.indexBottom > indexPositionMax)
         userParams.indexBottom = indexPositionMax;
       SetIndexPosition(userParams.indexBottom);
@@ -571,9 +578,9 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount >= windingCountMin + buttonHeldDelta)
+      if (userParams.windingCount >= windingCountMin + windingCountUserIncrementHeld)
       {
-        userParams.windingCount -= buttonHeldDelta;
+        userParams.windingCount -= windingCountUserIncrementHeld;
         PlaySound(Tone::OptionDecrementHeld);
       }
       else
@@ -581,16 +588,54 @@ void CheckMenuButtons()
         userParams.windingCount = windingCountMin;
       }
     }
-    if (menuSelect == int(MenuItem::WindSpeed))
+    else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + buttonHeldDelta)
+      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrementHeld)
       {
-        userParams.windingSpeedRpm -= buttonHeldDelta;
+        userParams.windingSpeedRpm -= windingRpmUserIncrementHeld;
+      }
+      else
+      {
+        userParams.windingSpeedRpm = windingSpeedRpmMin;
+        PlaySound(Tone::OptionDecrementHeld);
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexSpeed))
+    {
+      if (userParams.indexSpeed >= indexSpeedRpmMax + indexRpmUserIncrementHeld)
+      {
+        userParams.indexSpeed -= indexRpmUserIncrementHeld;
         PlaySound(Tone::OptionDecrementHeld);
       }
       else
       {
-        userParams.windingCount = windingSpeedRpmMin;
+        userParams.indexSpeed = indexSpeedRpmMin;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexTop))
+    {
+      if (userParams.indexTop >= indexPositionMin + indexPositionUserIncrementHeld)
+      {
+        userParams.indexTop -= indexPositionUserIncrementHeld;
+        SetIndexPosition(userParams.indexTop);
+        PlaySound(Tone::OptionDecrementHeld);
+      }
+      else
+      {
+        userParams.indexTop = indexPositionMin;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexBottom))
+    {
+      if (userParams.indexBottom >= indexPositionMin + indexPositionUserIncrementHeld)
+      {
+        userParams.indexBottom -= indexPositionUserIncrementHeld;
+        SetIndexPosition(userParams.indexBottom);
+        PlaySound(Tone::OptionDecrementHeld);
+      }
+      else
+      {
+        userParams.indexBottom = indexPositionMin;
       }
     }
   }
@@ -600,9 +645,9 @@ void CheckMenuButtons()
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount <= windingCountMax - buttonHeldDelta)
+      if (userParams.windingCount <= windingCountMax - windingCountUserIncrementHeld)
       {
-        userParams.windingCount += buttonHeldDelta;
+        userParams.windingCount += windingCountUserIncrementHeld;
         PlaySound(Tone::OptionIncrementHeld);
       }
       else
@@ -610,17 +655,54 @@ void CheckMenuButtons()
         userParams.windingCount = windingCountMax;
       }
     }
-
-    if (menuSelect == int(MenuItem::WindSpeed))
+    else if (menuSelect == int(MenuItem::WindSpeed))
     {
-      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - buttonHeldDelta)
+      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrementHeld)
       {
-        userParams.windingSpeedRpm += buttonHeldDelta;
+        userParams.windingSpeedRpm += windingRpmUserIncrementHeld;
         PlaySound(Tone::OptionIncrementHeld);
       }
       else
       {
         userParams.windingSpeedRpm = windingSpeedRpmMax;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexSpeed))
+    {
+      if (userParams.indexSpeed <= indexSpeedRpmMax - indexRpmUserIncrementHeld)
+      {
+        userParams.indexSpeed += indexRpmUserIncrementHeld;
+        PlaySound(Tone::OptionIncrementHeld);
+      }
+      else
+      {
+        userParams.indexSpeed = indexSpeedRpmMax;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexTop))
+    {
+      if (userParams.indexTop <= indexPositionMax - indexPositionUserIncrementHeld)
+      {
+        userParams.indexTop += indexPositionUserIncrementHeld;
+        SetIndexPosition(userParams.indexTop);
+        PlaySound(Tone::OptionIncrementHeld);
+      }
+      else
+      {
+        userParams.indexTop = indexPositionMax;
+      }
+    }
+    else if (menuSelect == int(MenuItem::IndexBottom))
+    {
+      if (userParams.indexBottom <= indexPositionMax - indexPositionUserIncrementHeld)
+      {
+        userParams.indexBottom += indexPositionUserIncrementHeld;
+        SetIndexPosition(userParams.indexBottom);
+        PlaySound(Tone::OptionIncrementHeld);
+      }
+      else
+      {
+        userParams.indexBottom = indexPositionMax;
       }
     }
   }
@@ -740,7 +822,7 @@ void StateWinding(bool firstRunFlag)
     // Reset motor PID (hacky method to reset internal accumulator, but it works).
     motorPID.SetOutputLimits(0, 1);
     motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
-    motorPID.SetMode(AUTOMATIC);   
+    motorPID.SetMode(AUTOMATIC);
 
     if (userParams.windingDirection == 0)
     {
@@ -897,6 +979,7 @@ void CountRotation()
     // Motor PID controller.
     if (motorPIDStartupFlag)
     {
+      // Deny first reading to reset delta time calculation.
       motorPIDStartupFlag = false;
     }
     else
@@ -985,6 +1068,4 @@ void loop()
 
   if (!controlButtonHeldFlag)
     UpdateLCD(); // ~52ms processing time.
-
-  SaveUserParams();
 }
