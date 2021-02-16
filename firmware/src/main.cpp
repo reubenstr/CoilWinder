@@ -67,17 +67,19 @@ const double indexPositionMin = 0;                 // Inches.
 double indexPosition = 0.0;                        // Inches from homed position.
 
 // DC Motor.
-const int motorPwmMin = 64;
-const int motorPwmMax = 255;
-const int motorIncrementPwmDelay = 50; // milliseconds.
-const int setPointRpmIncrement = 5;
-const int skipReadingsNum = 2;
-volatile int rotationCount;
+const unsigned int motorPwmMin = 64;
+const unsigned int motorPwmMax = 255;
+const unsigned int motorIncrementPwmDelay = 50; // milliseconds.
+const unsigned int setPointRpmIncrement = 5;
+const unsigned int skipReadingsNum = 2;
+const unsigned int motorStartRpm = 300;
+volatile unsigned int rotationCount;
+volatile bool motorPIDStartupFlag;
 RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
 
 // Motor PID controller.
 double pidSetpoint, pidInputRPM, pidOutputPWM;
-double Kp = .05, Ki = .075, Kd = .01;
+double Kp = .055, Ki = .075, Kd = .01;
 PID motorPID(&pidInputRPM, &pidOutputPWM, &pidSetpoint, Kp, Ki, Kd, DIRECT);
 
 // Buttons.
@@ -85,14 +87,16 @@ Button buttonMenuPrevious(PIN_BUTTON_MENU_PREVIOUS);
 Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
 Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
 Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
-const int buttonToneLengthMs = 20;
-const int holdToStartSec = 3;
-const int holdToStopSec = 3;
+const unsigned int buttonToneLengthMs = 20;
+const unsigned int holdToStartSec = 3;
+const unsigned int holdToStopSec = 3;
 const int buttonAnalogActiveThreshold = 10;
+const unsigned int buttonHeldDelta = 100;
+const unsigned int buttonHeldDelayForMultipleIncrementMs = 500; // milliseconds.
 
 // Display.
 LiquidCrystal_I2C lcd(0x27, 20, 2);
-const int toggleDisplayDelay = 2000;
+const unsigned int toggleDisplayDelay = 2000;
 
 // Main state.
 enum class State
@@ -121,9 +125,9 @@ enum class MenuItem
 struct UserParams
 {
   unsigned int windingCount = 1000;
-  int windingSpeedRpm = 1000;
-  int windingDirection;
-  int indexSpeed;
+  unsigned int windingSpeedRpm = 1000;
+  unsigned int windingDirection;
+  unsigned int indexSpeed;
   double indexTop = 0.25;
   double indexBottom = 0.0;
   bool playSounds = true;
@@ -132,8 +136,8 @@ struct UserParams
 // User params min/max values.
 const unsigned int windingCountMin = 10;
 const unsigned int windingCountMax = 60000;
-const int windingSpeedRpmMin = 300;
-const int windingSpeedRpmMax = 1000;
+const unsigned int windingSpeedRpmMin = 300;
+const unsigned int windingSpeedRpmMax = 1000;
 const double indexTopMin = indexPositionMin;
 const double indexTopMax = indexPositionMax;
 const double indexBottomMin = indexPositionMin;
@@ -152,6 +156,8 @@ enum class Tone
   MenuNext,
   OptionDecrement,
   OptionIncrement,
+  OptionDecrementHeld,
+  OptionIncrementHeld,
   RpmReached,
   StoppedWindingSuccess,
   StoppedWinding
@@ -222,6 +228,14 @@ void PlaySound(Tone t)
   else if (t == Tone::OptionIncrement)
   {
     tone(PIN_BUZZER, 1100, 50);
+  }
+  else if (t == Tone::OptionDecrementHeld)
+  {
+    tone(PIN_BUZZER, 880, 10);
+  }
+  else if (t == Tone::OptionIncrementHeld)
+  {
+    tone(PIN_BUZZER, 1100, 10);
   }
   else if (t == Tone::RpmReached)
   {
@@ -313,9 +327,7 @@ bool CheckControlButtons()
   static unsigned long startHeldCount;
   static unsigned long pauseHeldCount;
   static unsigned long stopHeldCount;
-  static bool startReleasedFlag;
   static bool pauseReleasedFlag;
-  static bool stopReleasedFlag;
 
   bool buttonHeldFlag = false;
 
@@ -555,25 +567,60 @@ void CheckMenuButtons()
   }
 
   // Option decrement held down.
-  if (buttonOptionDecrement.pressedFor(500))
+  if (buttonOptionDecrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount >= windingCountMin + 100)
+      if (userParams.windingCount >= windingCountMin + buttonHeldDelta)
       {
-        userParams.windingCount -= 100;
+        userParams.windingCount -= buttonHeldDelta;
+        PlaySound(Tone::OptionDecrementHeld);
+      }
+      else
+      {
+        userParams.windingCount = windingCountMin;
+      }
+    }
+    if (menuSelect == int(MenuItem::WindSpeed))
+    {
+      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + buttonHeldDelta)
+      {
+        userParams.windingSpeedRpm -= buttonHeldDelta;
+        PlaySound(Tone::OptionDecrementHeld);
+      }
+      else
+      {
+        userParams.windingCount = windingSpeedRpmMin;
       }
     }
   }
 
   // Option increment held down.
-  if (buttonOptionIncrement.pressedFor(500))
+  if (buttonOptionIncrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
   {
     if (menuSelect == int(MenuItem::WindCount))
     {
-      if (userParams.windingCount <= windingCountMax - 100)
+      if (userParams.windingCount <= windingCountMax - buttonHeldDelta)
       {
-        userParams.windingCount += 100;
+        userParams.windingCount += buttonHeldDelta;
+        PlaySound(Tone::OptionIncrementHeld);
+      }
+      else
+      {
+        userParams.windingCount = windingCountMax;
+      }
+    }
+
+    if (menuSelect == int(MenuItem::WindSpeed))
+    {
+      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - buttonHeldDelta)
+      {
+        userParams.windingSpeedRpm += buttonHeldDelta;
+        PlaySound(Tone::OptionIncrementHeld);
+      }
+      else
+      {
+        userParams.windingSpeedRpm = windingSpeedRpmMax;
       }
     }
   }
@@ -680,23 +727,20 @@ void StateWinding(bool firstRunFlag)
   int posBottom = userParams.indexBottom / stepperTravelPerSteps;
   int posTop = userParams.indexTop / stepperTravelPerSteps;
 
-  // Output debug motor values.
-  static unsigned long start = millis();
-  if (millis() - start > 250)
-  {
-    start = millis();
-    char buf[128];
-    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i", MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), userParams.windingSpeedRpm, int(pidOutputPWM));
-    Serial.println(buf);
-  }
-
   // Prepare variables and hardware for motor startup.
   if (firstRunFlag)
   {
     motorIncrementPwmMillis = millis();
-    accelerationPhaseFlag = true;
     rotationDeltaRunningMedian.clear();
+    accelerationPhaseFlag = true;
     playRpmReachedToneFlag = true;
+    motorPIDStartupFlag = true;
+    pidSetpoint = motorStartRpm;
+
+    // Reset motor PID (hacky method to reset internal accumulator, but it works).
+    motorPID.SetOutputLimits(0, 1);
+    motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
+    motorPID.SetMode(AUTOMATIC);   
 
     if (userParams.windingDirection == 0)
     {
@@ -710,6 +754,16 @@ void StateWinding(bool firstRunFlag)
     }
 
     analogWrite(PIN_MOTOR_PWM, motorPwmMin);
+  }
+
+  // Output debug motor values.
+  static unsigned long start = millis();
+  if (millis() - start > 250)
+  {
+    start = millis();
+    char buf[128];
+    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i", MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), userParams.windingSpeedRpm, int(pidOutputPWM));
+    Serial.println(buf);
   }
 
   // Accelerate motor until target RPM is reached.
@@ -765,7 +819,6 @@ void StateWinding(bool firstRunFlag)
 
 void StateController()
 {
-
   static bool resetWindingStateFlag = true;
 
   if (state == State::Standby)
@@ -842,12 +895,18 @@ void CountRotation()
   if (state == State::Winding)
   {
     // Motor PID controller.
-    unsigned long rotationDeltaTimeInstanious = micros() - prevMicros;
-    rotationDeltaRunningMedian.add(rotationDeltaTimeInstanious);
-    //int instaniousRpm = (1.0 / (rotationDeltaTimeInstanious * 2.0)) * 1000.0 * 1000.0 * 60.0;
-    pidInputRPM = MotorRpm(rotationDeltaTimeInstanious);
-    motorPID.Compute();
-    analogWrite(PIN_MOTOR_PWM, pidOutputPWM);
+    if (motorPIDStartupFlag)
+    {
+      motorPIDStartupFlag = false;
+    }
+    else
+    {
+      unsigned long rotationDeltaTimeInstanious = micros() - prevMicros;
+      rotationDeltaRunningMedian.add(rotationDeltaTimeInstanious);
+      pidInputRPM = MotorRpm(rotationDeltaTimeInstanious);
+      motorPID.Compute();
+      analogWrite(PIN_MOTOR_PWM, pidOutputPWM);
+    }
     prevMicros = micros();
   }
 
@@ -907,9 +966,6 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_EFFECT_SENSOR), CountRotation, FALLING);
 
   HomeIndexerStepper();
-
-  motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
-  motorPID.SetMode(AUTOMATIC);
 
   // Setup timer for stepper motor tick.
   Timer1.initialize(1000); // microseconds.
