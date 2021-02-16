@@ -57,22 +57,23 @@
 #define BUTTON_ACTIVE 0
 
 // Stepper.
+// Stepper is 200 steps per revolutioin and driver set for 1/2 microstepping.
 // Indexer lead screw is 2mm travel per turn (0.0787402 inches).
-// 0.0787402 / 400 = 0.0001968505 per step (at 1/2 step microstepping)
+// 0.0787402" / (200 / (1/2)) = 0.0001968505" per step
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
-const double stepperTravelPerSteps = 0.0001968505; // Inches.
-const double indexPositionUserIncrement = 0.025;   // Inches.
-const float indexPositionUserIncrementHeld = .100;
+const float stepperStepsPerRevolution = 200; // Most steppers are 200 steps/rev.
+const float stepperLeadScrewTravelPerRevolution = 0.0787402;
+const float stepperMicrosteps = 0.5;                                                                                        // Other user selectable options: 1/2, 1/4, 1/8, 1/16. (but precision is not necessary).
+const double stepperTravelPerSteps = stepperLeadScrewTravelPerRevolution / (stepperStepsPerRevolution / stepperMicrosteps); //0.0001968505 inches.
+const double indexPositionUserIncrement = 0.025;                                                                            // Inches.
+const float indexPositionUserIncrementHeld = 0.100;
 const unsigned int indexRpmUserIncrement = 10;
 const unsigned int indexRpmUserIncrementHeld = 10;
 const double indexPositionMax = 2.300; // Inches. Determined by machine physical travel limit.
 const double indexPositionMin = 0;     // Inches.
 const unsigned int indexSpeedRpmMin = 10;
-const unsigned int indexSpeedRpmMax = 100;
-const double indexTopMin = indexPositionMin;
-const double indexTopMax = indexPositionMax;
-const double indexBottomMin = indexPositionMin;
-const double indexBottomMax = indexPositionMax;
+const unsigned int indexSpeedRpmMax = 200;
+
 double indexPosition = 0.0; // Inches from homed position.
 
 // DC Motor.
@@ -85,7 +86,7 @@ const unsigned int motorStartRpm = 300;
 const unsigned int windingCountUserIncrement = 10;
 const unsigned int windingCountUserIncrementHeld = 100;
 const unsigned int windingRpmUserIncrement = 10;
-const unsigned int windingRpmUserIncrementHeld = 100;
+const unsigned int windingRpmUserIncrementHeld = 10;
 const unsigned int windingCountMin = 10;
 const unsigned int windingCountMax = 60000;
 const unsigned int windingSpeedRpmMin = 300;
@@ -140,13 +141,13 @@ enum class MenuItem
 // User params.
 struct UserParams
 {
-  unsigned int windingCount = 1000;
-  unsigned int windingSpeedRpm = 1000;
+  unsigned int windingCount;
+  unsigned int windingSpeedRpm;
   unsigned int windingDirection;
-  unsigned int indexSpeed;
-  double indexTop = 0.25;
-  double indexBottom = 0.0;
-  bool playSounds = true;
+  unsigned int indexSpeedRpm;
+  double indexTop;
+  double indexBottom;
+  bool playSounds;
 } userParams;
 
 int menuSelect = int(MenuItem::WindCount);
@@ -288,6 +289,11 @@ unsigned int MotorRpm(unsigned long timeDeltaUs)
   return (1.0 / (timeDeltaUs * 2.0)) * 1000.0 * 1000.0 * 60.0;
 }
 
+unsigned int CalcStepsPerSecondFromRpm(float rpm)
+{
+  return (rpm / 60.0) * (stepperStepsPerRevolution / stepperMicrosteps);
+}
+
 void SetIndexPosition(float pos)
 {
   stepper.moveTo(pos / stepperTravelPerSteps);
@@ -307,14 +313,14 @@ void LoadUserParams()
   if (userParams.windingDirection != 0 || userParams.windingDirection != 1)
     userParams.windingDirection = 0;
 
-  if (userParams.indexSpeed < indexSpeedRpmMin || userParams.indexSpeed > indexSpeedRpmMax)
-    userParams.indexSpeed = indexSpeedRpmMin;
+  if (userParams.indexSpeedRpm < indexSpeedRpmMin || userParams.indexSpeedRpm > indexSpeedRpmMax)
+    userParams.indexSpeedRpm = indexSpeedRpmMin;
 
-  if (userParams.indexTop < indexTopMin || userParams.indexTop > indexTopMax || isnan(userParams.indexTop))
-    userParams.indexTop = indexTopMin;
+  if (userParams.indexTop < indexPositionMin || userParams.indexTop > indexPositionMax || isnan(userParams.indexTop))
+    userParams.indexTop = indexPositionMin;
 
-  if (userParams.indexBottom < indexBottomMin || userParams.indexBottom > indexBottomMax || isnan(userParams.indexBottom))
-    userParams.indexBottom = indexBottomMin;
+  if (userParams.indexBottom < indexPositionMin || userParams.indexBottom > indexPositionMax || isnan(userParams.indexBottom))
+    userParams.indexBottom = indexPositionMin;
 
   if (userParams.playSounds != true || userParams.playSounds != false)
     userParams.playSounds = true;
@@ -432,228 +438,38 @@ void CheckMenuButtons()
   buttonOptionDecrement.read();
   buttonOptionIncrement.read();
 
-  // TODO: check system state, dont allow button presses while winding.
-
-  if (buttonMenuPrevious.wasPressed())
+  if (state == State::Winding)
   {
-    if (menuSelect == 0)
-    {
-      menuSelect = int(MenuItem::Count) - 1;
-    }
-    else
-    {
-      menuSelect--;
-    }
-
-    PlaySound(Tone::MenuPrevious);
-  }
-
-  if (buttonMenuNext.wasPressed())
-  {
-    if (menuSelect == int(MenuItem::Count) - 1)
-    {
-      menuSelect = 0;
-    }
-    else
-    {
-      menuSelect++;
-    }
-    PlaySound(Tone::MenuNext);
-  }
-
-  // Option decrement.
-  if (buttonOptionDecrement.wasPressed())
-  {
-    if (menuSelect == int(MenuItem::WindCount))
-    {
-      if (userParams.windingCount >= windingCountMin + windingCountUserIncrement)
-      {
-        userParams.windingCount -= windingCountUserIncrement;
-      }
-    }
-    else if (menuSelect == int(MenuItem::WindSpeed))
+    // Special during winding when the option buttons only control motor RPM.
+    if (buttonOptionDecrement.wasPressed())
     {
       if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrement)
       {
         userParams.windingSpeedRpm -= windingRpmUserIncrement;
+        PlaySound(Tone::OptionDecrement);
       }
     }
-    else if (menuSelect == int(MenuItem::WindDirection))
-    {
-      if (userParams.windingDirection == 0)
-        userParams.windingDirection = 1;
-      else
-        userParams.windingDirection = 0;
-    }
-    else if (menuSelect == int(MenuItem::IndexSpeed))
-    {
-      if (userParams.indexSpeed >= indexSpeedRpmMin + indexRpmUserIncrement)
-      {
-        userParams.indexSpeed -= indexRpmUserIncrement;
-      }
-    }
-    else if (menuSelect == int(MenuItem::IndexTop))
-    {
-      userParams.indexTop -= indexPositionUserIncrement;
-      if (userParams.indexTop < 0)
-        userParams.indexTop = 0;
-      SetIndexPosition(userParams.indexTop);
-    }
-    else if (menuSelect == int(MenuItem::IndexBottom))
-    {
-      userParams.indexBottom -= indexPositionUserIncrement;
-      if (userParams.indexBottom < 0)
-        userParams.indexBottom = 0;
-      SetIndexPosition(userParams.indexBottom);
-    }
-    else if (menuSelect == int(MenuItem::PlaySounds))
-    {
-      if (userParams.playSounds)
-        userParams.playSounds = false;
-      else
-        userParams.playSounds = true;
-    }
-    PlaySound(Tone::OptionDecrement);
-  }
-
-  // Option increment.
-  if (buttonOptionIncrement.wasPressed())
-  {
-    if (menuSelect == int(MenuItem::WindCount))
-    {
-      if (userParams.windingCount <= windingCountMax - windingSpeedRpmMin)
-      {
-        userParams.windingCount += windingCountUserIncrement;
-      }
-    }
-    else if (menuSelect == int(MenuItem::WindSpeed))
+    if (buttonOptionIncrement.wasPressed())
     {
       if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrement)
       {
         userParams.windingSpeedRpm += windingRpmUserIncrement;
+        PlaySound(Tone::OptionIncrement);
       }
     }
-    else if (menuSelect == int(MenuItem::WindDirection))
-    {
-      if (userParams.windingDirection == 0)
-        userParams.windingDirection = 1;
-      else
-        userParams.windingDirection = 0;
-    }
-    else if (menuSelect == int(MenuItem::IndexSpeed))
-    {
-      if (userParams.indexSpeed <= indexSpeedRpmMax - indexRpmUserIncrement)
-      {
-        userParams.indexSpeed += indexRpmUserIncrement;
-      }
-    }
-    else if (menuSelect == int(MenuItem::IndexTop))
-    {
-      userParams.indexTop += indexPositionUserIncrement;
-      if (userParams.indexTop > indexPositionMax)
-        userParams.indexTop = indexPositionMax;
-      SetIndexPosition(userParams.indexTop);
-    }
-    else if (menuSelect == int(MenuItem::IndexBottom))
-    {
-      userParams.indexBottom += indexPositionUserIncrement;
-      if (userParams.indexBottom > indexPositionMax)
-        userParams.indexBottom = indexPositionMax;
-      SetIndexPosition(userParams.indexBottom);
-    }
-    else if (menuSelect == int(MenuItem::PlaySounds))
-    {
-      if (userParams.playSounds)
-        userParams.playSounds = false;
-      else
-        userParams.playSounds = true;
-    }
-    PlaySound(Tone::OptionIncrement);
-  }
-
-  // Option decrement held down.
-  if (buttonOptionDecrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
-  {
-    if (menuSelect == int(MenuItem::WindCount))
-    {
-      if (userParams.windingCount >= windingCountMin + windingCountUserIncrementHeld)
-      {
-        userParams.windingCount -= windingCountUserIncrementHeld;
-        PlaySound(Tone::OptionDecrementHeld);
-      }
-      else
-      {
-        userParams.windingCount = windingCountMin;
-      }
-    }
-    else if (menuSelect == int(MenuItem::WindSpeed))
+    if (buttonOptionDecrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
     {
       if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrementHeld)
       {
         userParams.windingSpeedRpm -= windingRpmUserIncrementHeld;
+        PlaySound(Tone::OptionDecrementHeld);
       }
       else
       {
         userParams.windingSpeedRpm = windingSpeedRpmMin;
-        PlaySound(Tone::OptionDecrementHeld);
       }
     }
-    else if (menuSelect == int(MenuItem::IndexSpeed))
-    {
-      if (userParams.indexSpeed >= indexSpeedRpmMax + indexRpmUserIncrementHeld)
-      {
-        userParams.indexSpeed -= indexRpmUserIncrementHeld;
-        PlaySound(Tone::OptionDecrementHeld);
-      }
-      else
-      {
-        userParams.indexSpeed = indexSpeedRpmMin;
-      }
-    }
-    else if (menuSelect == int(MenuItem::IndexTop))
-    {
-      if (userParams.indexTop >= indexPositionMin + indexPositionUserIncrementHeld)
-      {
-        userParams.indexTop -= indexPositionUserIncrementHeld;
-        SetIndexPosition(userParams.indexTop);
-        PlaySound(Tone::OptionDecrementHeld);
-      }
-      else
-      {
-        userParams.indexTop = indexPositionMin;
-      }
-    }
-    else if (menuSelect == int(MenuItem::IndexBottom))
-    {
-      if (userParams.indexBottom >= indexPositionMin + indexPositionUserIncrementHeld)
-      {
-        userParams.indexBottom -= indexPositionUserIncrementHeld;
-        SetIndexPosition(userParams.indexBottom);
-        PlaySound(Tone::OptionDecrementHeld);
-      }
-      else
-      {
-        userParams.indexBottom = indexPositionMin;
-      }
-    }
-  }
-
-  // Option increment held down.
-  if (buttonOptionIncrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
-  {
-    if (menuSelect == int(MenuItem::WindCount))
-    {
-      if (userParams.windingCount <= windingCountMax - windingCountUserIncrementHeld)
-      {
-        userParams.windingCount += windingCountUserIncrementHeld;
-        PlaySound(Tone::OptionIncrementHeld);
-      }
-      else
-      {
-        userParams.windingCount = windingCountMax;
-      }
-    }
-    else if (menuSelect == int(MenuItem::WindSpeed))
+    if (buttonOptionIncrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
     {
       if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrementHeld)
       {
@@ -665,42 +481,278 @@ void CheckMenuButtons()
         userParams.windingSpeedRpm = windingSpeedRpmMax;
       }
     }
-    else if (menuSelect == int(MenuItem::IndexSpeed))
+  }
+  else if (state == State::Standby)
+  {
+
+    if (buttonMenuPrevious.wasPressed())
     {
-      if (userParams.indexSpeed <= indexSpeedRpmMax - indexRpmUserIncrementHeld)
+      if (menuSelect == 0)
       {
-        userParams.indexSpeed += indexRpmUserIncrementHeld;
-        PlaySound(Tone::OptionIncrementHeld);
+        menuSelect = int(MenuItem::Count) - 1;
       }
       else
       {
-        userParams.indexSpeed = indexSpeedRpmMax;
+        menuSelect--;
       }
+
+      PlaySound(Tone::MenuPrevious);
     }
-    else if (menuSelect == int(MenuItem::IndexTop))
+
+    if (buttonMenuNext.wasPressed())
     {
-      if (userParams.indexTop <= indexPositionMax - indexPositionUserIncrementHeld)
+      if (menuSelect == int(MenuItem::Count) - 1)
       {
-        userParams.indexTop += indexPositionUserIncrementHeld;
+        menuSelect = 0;
+      }
+      else
+      {
+        menuSelect++;
+      }
+      PlaySound(Tone::MenuNext);
+    }
+
+    // Option decrement.
+    if (buttonOptionDecrement.wasPressed())
+    {
+      if (menuSelect == int(MenuItem::WindCount))
+      {
+        if (userParams.windingCount >= windingCountMin + windingCountUserIncrement)
+        {
+          userParams.windingCount -= windingCountUserIncrement;
+        }
+      }
+      else if (menuSelect == int(MenuItem::WindSpeed))
+      {
+        if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrement)
+        {
+          userParams.windingSpeedRpm -= windingRpmUserIncrement;
+        }
+      }
+      else if (menuSelect == int(MenuItem::WindDirection))
+      {
+        if (userParams.windingDirection == 0)
+          userParams.windingDirection = 1;
+        else
+          userParams.windingDirection = 0;
+      }
+      else if (menuSelect == int(MenuItem::IndexSpeed))
+      {
+        if (userParams.indexSpeedRpm >= indexSpeedRpmMin + indexRpmUserIncrement)
+        {
+          userParams.indexSpeedRpm -= indexRpmUserIncrement;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexTop))
+      {
+        userParams.indexTop -= indexPositionUserIncrement;
+        if (userParams.indexTop < 0)
+          userParams.indexTop = 0;
         SetIndexPosition(userParams.indexTop);
-        PlaySound(Tone::OptionIncrementHeld);
       }
-      else
+      else if (menuSelect == int(MenuItem::IndexBottom))
       {
-        userParams.indexTop = indexPositionMax;
+        userParams.indexBottom -= indexPositionUserIncrement;
+        if (userParams.indexBottom < 0)
+          userParams.indexBottom = 0;
+        SetIndexPosition(userParams.indexBottom);
+      }
+      else if (menuSelect == int(MenuItem::PlaySounds))
+      {
+        if (userParams.playSounds)
+          userParams.playSounds = false;
+        else
+          userParams.playSounds = true;
+      }
+      PlaySound(Tone::OptionDecrement);
+    }
+
+    // Option increment.
+    if (buttonOptionIncrement.wasPressed())
+    {
+      if (menuSelect == int(MenuItem::WindCount))
+      {
+        if (userParams.windingCount <= windingCountMax - windingSpeedRpmMin)
+        {
+          userParams.windingCount += windingCountUserIncrement;
+        }
+      }
+      else if (menuSelect == int(MenuItem::WindSpeed))
+      {
+        if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrement)
+        {
+          userParams.windingSpeedRpm += windingRpmUserIncrement;
+        }
+      }
+      else if (menuSelect == int(MenuItem::WindDirection))
+      {
+        if (userParams.windingDirection == 0)
+          userParams.windingDirection = 1;
+        else
+          userParams.windingDirection = 0;
+      }
+      else if (menuSelect == int(MenuItem::IndexSpeed))
+      {
+        if (userParams.indexSpeedRpm <= indexSpeedRpmMax - indexRpmUserIncrement)
+        {
+          userParams.indexSpeedRpm += indexRpmUserIncrement;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexTop))
+      {
+        userParams.indexTop += indexPositionUserIncrement;
+        if (userParams.indexTop > indexPositionMax)
+          userParams.indexTop = indexPositionMax;
+        SetIndexPosition(userParams.indexTop);
+      }
+      else if (menuSelect == int(MenuItem::IndexBottom))
+      {
+        userParams.indexBottom += indexPositionUserIncrement;
+        if (userParams.indexBottom > indexPositionMax)
+          userParams.indexBottom = indexPositionMax;
+        SetIndexPosition(userParams.indexBottom);
+      }
+      else if (menuSelect == int(MenuItem::PlaySounds))
+      {
+        if (userParams.playSounds)
+          userParams.playSounds = false;
+        else
+          userParams.playSounds = true;
+      }
+      PlaySound(Tone::OptionIncrement);
+    }
+
+    // Option decrement held down.
+    if (buttonOptionDecrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
+    {
+      if (menuSelect == int(MenuItem::WindCount))
+      {
+        if (userParams.windingCount >= windingCountMin + windingCountUserIncrementHeld)
+        {
+          userParams.windingCount -= windingCountUserIncrementHeld;
+          PlaySound(Tone::OptionDecrementHeld);
+        }
+        else
+        {
+          userParams.windingCount = windingCountMin;
+        }
+      }
+      else if (menuSelect == int(MenuItem::WindSpeed))
+      {
+        if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrementHeld)
+        {
+          userParams.windingSpeedRpm -= windingRpmUserIncrementHeld;
+          PlaySound(Tone::OptionDecrementHeld);
+        }
+        else
+        {
+          userParams.windingSpeedRpm = windingSpeedRpmMin;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexSpeed))
+      {
+        if (userParams.indexSpeedRpm >= indexSpeedRpmMin + indexRpmUserIncrementHeld)
+        {
+          userParams.indexSpeedRpm -= indexRpmUserIncrementHeld;
+          PlaySound(Tone::OptionDecrementHeld);
+        }
+        else
+        {
+          userParams.indexSpeedRpm = indexSpeedRpmMin;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexTop))
+      {
+        if (userParams.indexTop >= indexPositionMin + indexPositionUserIncrementHeld)
+        {
+          userParams.indexTop -= indexPositionUserIncrementHeld;
+          SetIndexPosition(userParams.indexTop);
+          PlaySound(Tone::OptionDecrementHeld);
+        }
+        else
+        {
+          userParams.indexTop = indexPositionMin;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexBottom))
+      {
+        if (userParams.indexBottom >= indexPositionMin + indexPositionUserIncrementHeld)
+        {
+          userParams.indexBottom -= indexPositionUserIncrementHeld;
+          SetIndexPosition(userParams.indexBottom);
+          PlaySound(Tone::OptionDecrementHeld);
+        }
+        else
+        {
+          userParams.indexBottom = indexPositionMin;
+        }
       }
     }
-    else if (menuSelect == int(MenuItem::IndexBottom))
+
+    // Option increment held down.
+    if (buttonOptionIncrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
     {
-      if (userParams.indexBottom <= indexPositionMax - indexPositionUserIncrementHeld)
+      if (menuSelect == int(MenuItem::WindCount))
       {
-        userParams.indexBottom += indexPositionUserIncrementHeld;
-        SetIndexPosition(userParams.indexBottom);
-        PlaySound(Tone::OptionIncrementHeld);
+        if (userParams.windingCount <= windingCountMax - windingCountUserIncrementHeld)
+        {
+          userParams.windingCount += windingCountUserIncrementHeld;
+          PlaySound(Tone::OptionIncrementHeld);
+        }
+        else
+        {
+          userParams.windingCount = windingCountMax;
+        }
       }
-      else
+      else if (menuSelect == int(MenuItem::WindSpeed))
       {
-        userParams.indexBottom = indexPositionMax;
+        if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrementHeld)
+        {
+          userParams.windingSpeedRpm += windingRpmUserIncrementHeld;
+          PlaySound(Tone::OptionIncrementHeld);
+        }
+        else
+        {
+          userParams.windingSpeedRpm = windingSpeedRpmMax;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexSpeed))
+      {
+        if (userParams.indexSpeedRpm <= indexSpeedRpmMax - indexRpmUserIncrementHeld)
+        {
+          userParams.indexSpeedRpm += indexRpmUserIncrementHeld;
+          PlaySound(Tone::OptionIncrementHeld);
+        }
+        else
+        {
+          userParams.indexSpeedRpm = indexSpeedRpmMax;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexTop))
+      {
+        if (userParams.indexTop <= indexPositionMax - indexPositionUserIncrementHeld)
+        {
+          userParams.indexTop += indexPositionUserIncrementHeld;
+          SetIndexPosition(userParams.indexTop);
+          PlaySound(Tone::OptionIncrementHeld);
+        }
+        else
+        {
+          userParams.indexTop = indexPositionMax;
+        }
+      }
+      else if (menuSelect == int(MenuItem::IndexBottom))
+      {
+        if (userParams.indexBottom <= indexPositionMax - indexPositionUserIncrementHeld)
+        {
+          userParams.indexBottom += indexPositionUserIncrementHeld;
+          SetIndexPosition(userParams.indexBottom);
+          PlaySound(Tone::OptionIncrementHeld);
+        }
+        else
+        {
+          userParams.indexBottom = indexPositionMax;
+        }
       }
     }
   }
@@ -748,7 +800,7 @@ void UpdateLCD()
     else if (menuSelect == int(MenuItem::IndexSpeed))
     {
       PrintLine(0, "Index Speed:");
-      sprintf(buf, "%u RPM", userParams.indexSpeed);
+      sprintf(buf, "%u RPM", userParams.indexSpeedRpm);
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::IndexTop))
@@ -779,7 +831,7 @@ void UpdateLCD()
       sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
     else
     {
-      sprintf(buf, "%u RPM", MotorRpm(rotationDeltaRunningMedian.getAverage()));
+      sprintf(buf, "%u of %u RPM", MotorRpm(rotationDeltaRunningMedian.getAverage()), userParams.windingSpeedRpm);
     }
 
     PrintLine(1, buf);
@@ -817,6 +869,12 @@ void StateWinding(bool firstRunFlag)
     motorPIDStartupFlag = true;
     pidSetpoint = motorStartRpm;
 
+    int indexerStepperSpeedStepsSec = CalcStepsPerSecondFromRpm(userParams.indexSpeedRpm);
+    int indexerStepperAcclerationStepsSec = CalcStepsPerSecondFromRpm(userParams.indexSpeedRpm) * 3;
+
+    stepper.setMaxSpeed(indexerStepperSpeedStepsSec);
+    stepper.setAcceleration(indexerStepperAcclerationStepsSec);
+
     // Reset motor PID (hacky method to reset internal accumulator, but it works).
     motorPID.SetOutputLimits(0, 1);
     motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
@@ -834,6 +892,11 @@ void StateWinding(bool firstRunFlag)
     }
 
     analogWrite(PIN_MOTOR_PWM, motorPwmMin);
+
+    char buf[128];
+    Serial.println("Starting winding...");
+    sprintf(buf, "Indexer stepper RPM: %u | steps/sec: %u | accleration steps/sec^s %u", userParams.indexSpeedRpm, indexerStepperSpeedStepsSec, indexerStepperAcclerationStepsSec);
+    Serial.println(buf);
   }
 
   // Output debug motor values.
@@ -842,7 +905,8 @@ void StateWinding(bool firstRunFlag)
   {
     start = millis();
     char buf[128];
-    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i", MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), userParams.windingSpeedRpm, int(pidOutputPWM));
+    sprintf(buf, "Detected (avg.) RPM: %4i | Set Point RPM: %4i | Final RPM: %4i | Motor PWM: %3i || Stepper steps/sec: %i",
+            MotorRpm(rotationDeltaRunningMedian.getAverage()), int(pidSetpoint), userParams.windingSpeedRpm, int(pidOutputPWM), int(stepper.speed()));
     Serial.println(buf);
   }
 
@@ -863,6 +927,10 @@ void StateWinding(bool firstRunFlag)
       }
     }
   }
+  else
+  {
+    pidSetpoint = userParams.windingSpeedRpm;
+  }
 
   // Play tone once when motor RPM reaches target RPM.
   if (playRpmReachedToneFlag)
@@ -875,17 +943,19 @@ void StateWinding(bool firstRunFlag)
   }
 
   // Move indexer up and down.
-  if (stepper.currentPosition() == posTop)
+  static bool indexDirectionToggle;
+  if (!stepper.isRunning())
   {
-    stepper.moveTo(posBottom);
-  }
-  else if (stepper.currentPosition() == posBottom)
-  {
-    stepper.moveTo(posTop);
-  }
-  else if (!stepper.isRunning())
-  {
-    stepper.moveTo(posTop);
+    indexDirectionToggle = !indexDirectionToggle;
+
+    if (indexDirectionToggle)
+    {
+      stepper.moveTo(posBottom);
+    }
+    else
+    {
+      stepper.moveTo(posTop);
+    }
   }
 
   // Check for final conditions.
@@ -928,7 +998,10 @@ void StateController()
 // Call prior to enabling stepper tick interrupt.
 bool HomeIndexerStepper()
 {
-  PrintLine(0, "Homing stepper");
+  PrintLine(0, "Homing indexer");
+
+  stepper.setMaxSpeed(1000);
+  stepper.setAcceleration(2000);
 
   // Move stepper down physical range (+10%) in order to hit the limit switch.
   stepper.setCurrentPosition(0);
@@ -953,7 +1026,7 @@ bool HomeIndexerStepper()
 
   if (indexSuccessFlag == false)
   {
-    PrintLine(0, "Stepper failed");
+    PrintLine(0, "Indexer failed");
     PrintLine(1, "to home!");
     PlaySound(Tone::StepperHomeFailed);
     while (true)
@@ -1034,9 +1107,6 @@ void setup()
   lcd.backlight();
   lcd.clear();
 
-  stepper.setMaxSpeed(2000);
-  stepper.setAcceleration(8000);
-
   buttonMenuPrevious.begin();
   buttonMenuNext.begin();
   buttonOptionDecrement.begin();
@@ -1049,7 +1119,7 @@ void setup()
   HomeIndexerStepper();
 
   // Setup timer for stepper motor tick.
-  Timer1.initialize(1000); // microseconds.
+  Timer1.initialize(250); // microseconds.
   Timer1.attachInterrupt(IndexerStepperCallback);
 
   state = State::Standby;
