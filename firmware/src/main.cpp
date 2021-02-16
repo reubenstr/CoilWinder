@@ -69,11 +69,11 @@ const double indexPositionMax = 2.300; // Inches. Determined by machine physical
 const double indexPositionMin = 0;     // Inches.
 const unsigned int indexSpeedRpmMin = 10;
 const unsigned int indexSpeedRpmMax = 100;
-double indexPosition = 0.0; // Inches from homed position.
 const double indexTopMin = indexPositionMin;
 const double indexTopMax = indexPositionMax;
 const double indexBottomMin = indexPositionMin;
 const double indexBottomMax = indexPositionMax;
+double indexPosition = 0.0; // Inches from homed position.
 
 // DC Motor.
 const unsigned int motorPwmMin = 64;
@@ -82,23 +82,21 @@ const unsigned int motorIncrementPwmDelay = 50; // milliseconds.
 const unsigned int setPointRpmIncrement = 5;
 const unsigned int skipReadingsNum = 2;
 const unsigned int motorStartRpm = 300;
-volatile unsigned int rotationCount;
-volatile bool motorPIDStartupFlag;
-RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
-
 const unsigned int windingCountUserIncrement = 10;
 const unsigned int windingCountUserIncrementHeld = 100;
 const unsigned int windingRpmUserIncrement = 10;
 const unsigned int windingRpmUserIncrementHeld = 100;
-
 const unsigned int windingCountMin = 10;
 const unsigned int windingCountMax = 60000;
 const unsigned int windingSpeedRpmMin = 300;
 const unsigned int windingSpeedRpmMax = 1000;
+volatile unsigned int rotationCount;
+volatile bool motorPIDStartupFlag;
+RunningMedian rotationDeltaRunningMedian(20); // For cleaner RPM visualization.
 
 // Motor PID controller.
 double pidSetpoint, pidInputRPM, pidOutputPWM;
-double Kp = .055, Ki = .075, Kd = .01;
+const double Kp = .055, Ki = .075, Kd = .01;
 PID motorPID(&pidInputRPM, &pidOutputPWM, &pidSetpoint, Kp, Ki, Kd, DIRECT);
 
 // Buttons.
@@ -283,7 +281,7 @@ void PrintLine(int line, const char str[])
   lcd.printstr(buf);
 }
 
-int MotorRpm(unsigned long timeDeltaUs)
+unsigned int MotorRpm(unsigned long timeDeltaUs)
 {
   // Calculate motor RPM from delta time between rotational sensors.
   // 1 / ((timeDelta in microseconds between sensor trigger) * (two sensors triggers per rotation)) * (1000 us/ms) *  (1000 ms/s) * (60 s/min)
@@ -338,7 +336,7 @@ bool CheckControlButtons()
   bool buttonHeldFlag = false;
 
   // Start button.
-  if (analogRead(PIN_BUTTON_START) < buttonAnalogActiveThreshold)
+  if (analogRead(PIN_BUTTON_START) < int(buttonAnalogActiveThreshold))
   {
     if (state == State::Standby)
     {
@@ -351,7 +349,7 @@ bool CheckControlButtons()
       {
         PrintLine(0, "Hold button");
         char buf[20];
-        sprintf(buf, "to start.    (%u)", holdToStartSec - (millis() - startHeldCount) / 1000);
+        sprintf(buf, "to start.    (%i)", int(holdToStartSec - (millis() - startHeldCount) / 1000));
         PrintLine(1, buf);
 
         buttonHeldFlag = true;
@@ -366,7 +364,7 @@ bool CheckControlButtons()
   }
 
   // Pause button.
-  if (analogRead(PIN_BUTTON_PAUSE) < buttonAnalogActiveThreshold)
+  if (analogRead(PIN_BUTTON_PAUSE) < int(buttonAnalogActiveThreshold))
   {
     if (state == State::Winding || state == State::Pause)
     {
@@ -396,7 +394,7 @@ bool CheckControlButtons()
   }
 
   // Stop button.
-  if (analogRead(PIN_BUTTON_STOP) < buttonAnalogActiveThreshold)
+  if (analogRead(PIN_BUTTON_STOP) < int(buttonAnalogActiveThreshold))
   {
     if (state == State::Pause || state == State::Winding)
     {
@@ -410,7 +408,7 @@ bool CheckControlButtons()
       {
         PrintLine(0, "Hold button");
         char buf[20];
-        sprintf(buf, "to stop.     (%u)", holdToStopSec - (millis() - stopHeldCount) / 1000);
+        sprintf(buf, "to stop.     (%i)", int(holdToStopSec - (millis() - stopHeldCount) / 1000));
         PrintLine(1, buf);
 
         buttonHeldFlag = true;
@@ -756,13 +754,13 @@ void UpdateLCD()
     else if (menuSelect == int(MenuItem::IndexTop))
     {
       PrintLine(0, "Index Top:");
-      sprintf(buf, dtostrf(userParams.indexTop, 5, 3, "%5.3f"));
+      sprintf(buf, dtostrf(userParams.indexTop, 5, 3, "%5.3f")); // Compiler warning is ignorable.
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::IndexBottom))
     {
       PrintLine(0, "Index Bottom:");
-      sprintf(buf, dtostrf(userParams.indexBottom, 5, 3, "%5.3f"));
+      sprintf(buf, dtostrf(userParams.indexBottom, 5, 3, "%5.3f")); // Compiler warning is ignorable.
       PrintLine(1, buf);
     }
     else if (menuSelect == int(MenuItem::PlaySounds))
