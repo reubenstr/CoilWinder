@@ -6,22 +6,22 @@
 
   Hardware:
     Microcontroller: Arduino Nano (Atmel Atmega328P)
-    Motor driver: TB6612FNG module.
-    Stepper driver: TMC2208 module (non-UART version).
+    Motor driver: TB6612FNG (breakout module).
+    Stepper driver: TMC2208 (step stick, non-UART version).
     
-
   Notes:
     
 
   To Do:
     Add no motor RPM detected timeout.
+    Confirm/fix motor restart RPM overshoot.
 
 
   HISTORY
 
-  VERSION  AUTHOR  DATE  NOTES
-  ===============================
-  0.1.0 ReubenStr 2021/15/2 Development phase.
+  VERSION   AUTHOR      DATE        NOTES
+  =============================================================================
+  0.1.0     ReubenStr   2021/15/2   Development phase.
 
 */
 
@@ -73,7 +73,6 @@ const double indexPositionMax = 2.300; // Inches. Determined by machine physical
 const double indexPositionMin = 0;     // Inches.
 const unsigned int indexSpeedRpmMin = 10;
 const unsigned int indexSpeedRpmMax = 200;
-
 double indexPosition = 0.0; // Inches from homed position.
 
 // DC Motor.
@@ -82,7 +81,7 @@ const unsigned int motorPwmMax = 255;
 const unsigned int motorIncrementPwmDelay = 50; // milliseconds.
 const unsigned int setPointRpmIncrement = 5;
 const unsigned int skipReadingsNum = 2;
-const unsigned int motorStartRpm = 300;
+const unsigned int windingStartRpm = 300;
 const unsigned int windingCountUserIncrement = 10;
 const unsigned int windingCountUserIncrementHeld = 100;
 const unsigned int windingRpmUserIncrement = 10;
@@ -106,14 +105,14 @@ Button buttonMenuNext(PIN_BUTTON_MENU_NEXT);
 Button buttonOptionDecrement(PIN_BUTTON_OPTION_DOWN);
 Button buttonOptionIncrement(PIN_BUTTON_OPTION_UP);
 const unsigned int buttonToneLengthMs = 20;
-const unsigned int holdToStartSec = 3;
-const unsigned int holdToStopSec = 3;
+const unsigned int buttonHoldToStartSec = 3;
+const unsigned int buttonHoldToStopSec = 3;
 const unsigned int buttonAnalogActiveThreshold = 10;
 const unsigned int buttonHeldDelayForMultipleIncrementMs = 500; // milliseconds.
 
 // Display.
 LiquidCrystal_I2C lcd(0x27, 20, 2);
-const unsigned int toggleDisplayDelay = 2000;
+const unsigned int displayToggleDelay = 2000;
 const unsigned int userMenuTimeoutDuringPaused = 2500; // milliseconds.
 
 enum class DisplaySet
@@ -412,7 +411,7 @@ bool CheckControlButtons()
   {
     if (state == State::Standby)
     {
-      if (millis() - startHeldCount >= holdToStartSec * 1000)
+      if (millis() - startHeldCount >= buttonHoldToStartSec * 1000)
       {
         SaveUserParams();
         PlaySound(Tone::Started);
@@ -420,7 +419,7 @@ bool CheckControlButtons()
       }
       else if (millis() - startHeldCount > 100)
       {
-        changeStateCountdown = holdToStartSec - (millis() - startHeldCount) / 1000;
+        changeStateCountdown = buttonHoldToStartSec - (millis() - startHeldCount) / 1000;
         if (previousChangeStateCountdownStart != changeStateCountdown)
         {
           previousChangeStateCountdownStart = changeStateCountdown;
@@ -472,14 +471,14 @@ bool CheckControlButtons()
     {
       state = State::Paused;
 
-      if (millis() - stopHeldCount >= holdToStopSec * 1000)
+      if (millis() - stopHeldCount >= buttonHoldToStopSec * 1000)
       {
         PlaySound(Tone::Stopped);
         state = State::Stopped;
       }
       else if (millis() - stopHeldCount > 100)
       {
-        changeStateCountdown = holdToStopSec - (millis() - stopHeldCount) / 1000;
+        changeStateCountdown = buttonHoldToStopSec - (millis() - stopHeldCount) / 1000;
         if (previousChangeStateCountdownStop != changeStateCountdown)
         {
           previousChangeStateCountdownStop = changeStateCountdown;
@@ -860,7 +859,7 @@ void UpdateLCD(DisplaySet displaySet)
   {
     static bool toggleDisplay;
     static unsigned long toggleDisplayMillis = millis();
-    if (millis() - toggleDisplayMillis > toggleDisplayDelay)
+    if (millis() - toggleDisplayMillis > displayToggleDelay)
     {
       toggleDisplayMillis = millis();
       toggleDisplay = !toggleDisplay;
@@ -922,7 +921,7 @@ void StateWinding(bool firstRunFlag)
     accelerationPhaseFlag = true;
     playRpmReachedToneFlag = true;
     motorPIDStartupFlag = true;
-    pidSetpoint = motorStartRpm;
+    pidSetpoint = windingStartRpm;
 
     int indexerStepperSpeedStepsSec = CalcStepsPerSecondFromRpm(userParams.indexSpeedRpm);
     int indexerStepperAcclerationStepsSec = CalcStepsPerSecondFromRpm(userParams.indexSpeedRpm) * 3;
@@ -930,7 +929,7 @@ void StateWinding(bool firstRunFlag)
     stepper.setMaxSpeed(indexerStepperSpeedStepsSec);
     stepper.setAcceleration(indexerStepperAcclerationStepsSec);
 
-    // Reset motor PID (hacky method to reset internal accumulator, but it works).
+    // Reset motor PID (hacky method to reset internal accumulator, but it works, mostly).
     motorPID.SetOutputLimits(0, 1);
     motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
     motorPID.SetMode(AUTOMATIC);
@@ -1191,6 +1190,7 @@ void loop()
 
   bool controlButtonActiveFlag = CheckControlButtons();
 
+  // LCD control logic.
   if (controlButtonActiveFlag)
   {
     UpdateLCD(DisplaySet::Countdown);
