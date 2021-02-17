@@ -114,16 +114,27 @@ const unsigned int buttonHeldDelayForMultipleIncrementMs = 500; // milliseconds.
 // Display.
 LiquidCrystal_I2C lcd(0x27, 20, 2);
 const unsigned int toggleDisplayDelay = 2000;
+const unsigned int userMenuTimeoutDuringPaused = 2500; // milliseconds.
+
+enum class DisplaySet
+{
+  UserVariables,
+  Countdown,
+  Winding,
+  Paused,
+  Stopped
+};
 
 // Main state.
 enum class State
 {
   Standby,
   Winding,
-  Pause,
-  Stop
+  Paused,
+  Stopped
 };
 State state = State::Standby;
+unsigned int changeStateCountdown;
 
 enum class MenuItem
 {
@@ -163,6 +174,10 @@ enum class Tone
   OptionIncrement,
   OptionDecrementHeld,
   OptionIncrementHeld,
+  Countdown,
+  Started,
+  Paused,
+  Stopped,
   RpmReached,
   StoppedWindingSuccess,
   StoppedWinding
@@ -192,6 +207,27 @@ void SetLED(LED led, bool state)
   else if (led == LED::Stop)
   {
     analogWrite(PIN_LED_STOP, state ? 127 : 0);
+  }
+}
+
+void UpdateLEDs()
+{
+  if (state == State::Winding)
+  {
+    SetLED(LED::Start, HIGH);
+  }
+  else
+  {
+    SetLED(LED::Start, LOW);
+  }
+
+  if (state == State::Paused)
+  {
+    SetLED(LED::Pause, HIGH);
+  }
+  else
+  {
+    SetLED(LED::Pause, LOW);
   }
 }
 
@@ -241,6 +277,34 @@ void PlaySound(Tone t)
   else if (t == Tone::OptionIncrementHeld)
   {
     tone(PIN_BUZZER, 1100, 10);
+  }
+  else if (t == Tone::Countdown)
+  {
+    tone(PIN_BUZZER, 880, 100);
+  }
+  else if (t == Tone::Started)
+  {
+    for (int i = 0; i < 4; i++)
+    {
+      tone(PIN_BUZZER, 880 + i * 40, 100);
+      delay(100);
+    }
+  }
+  else if (t == Tone::Paused)
+  {
+    for (int i = 0; i < 4; i++)
+    {
+      tone(PIN_BUZZER, 880, 50);
+      delay(100);
+    }
+  }
+  else if (t == Tone::Stopped)
+  {
+    for (int i = 0; i < 4; i++)
+    {
+      tone(PIN_BUZZER, 880 - i * 40, 100);
+      delay(100);
+    }
   }
   else if (t == Tone::RpmReached)
   {
@@ -338,6 +402,8 @@ bool CheckControlButtons()
   static unsigned long pauseHeldCount;
   static unsigned long stopHeldCount;
   static bool pauseReleasedFlag;
+  static unsigned int previousChangeStateCountdownStart;
+  static unsigned int previousChangeStateCountdownStop;
 
   bool buttonHeldFlag = false;
 
@@ -349,30 +415,30 @@ bool CheckControlButtons()
       if (millis() - startHeldCount >= holdToStartSec * 1000)
       {
         SaveUserParams();
+        PlaySound(Tone::Started);
         state = State::Winding;
       }
       else if (millis() - startHeldCount > 100)
       {
-        PrintLine(0, "Hold button");
-        char buf[20];
-        sprintf(buf, "to start.    (%i)", int(holdToStartSec - (millis() - startHeldCount) / 1000));
-        PrintLine(1, buf);
-
+        changeStateCountdown = holdToStartSec - (millis() - startHeldCount) / 1000;
+        if (previousChangeStateCountdownStart != changeStateCountdown)
+        {
+          previousChangeStateCountdownStart = changeStateCountdown;
+          PlaySound(Tone::Countdown);
+        }
         buttonHeldFlag = true;
       }
-      SetLED(LED::Start, HIGH);
     }
   }
   else
-  {
-    SetLED(LED::Start, LOW);
+  {  
     startHeldCount = millis();
   }
 
   // Pause button.
   if (analogRead(PIN_BUTTON_PAUSE) < int(buttonAnalogActiveThreshold))
   {
-    if (state == State::Winding || state == State::Pause)
+    if (state == State::Winding || state == State::Paused)
     {
       if (millis() - pauseHeldCount > 100)
       {
@@ -381,20 +447,20 @@ bool CheckControlButtons()
           pauseReleasedFlag = false;
           if (state == State::Winding)
           {
-            state = State::Pause;
+            PlaySound(Tone::Paused);
+            state = State::Paused;
           }
-          else if (state == State::Pause)
+          else if (state == State::Paused)
           {
+            PlaySound(Tone::Started);
             state = State::Winding;
           }
         }
       }
-      SetLED(LED::Pause, HIGH);
     }
   }
   else
   {
-    SetLED(LED::Pause, LOW);
     pauseHeldCount = millis();
     pauseReleasedFlag = true;
   }
@@ -402,21 +468,23 @@ bool CheckControlButtons()
   // Stop button.
   if (analogRead(PIN_BUTTON_STOP) < int(buttonAnalogActiveThreshold))
   {
-    if (state == State::Pause || state == State::Winding)
+    if (state == State::Paused || state == State::Winding)
     {
-      state = State::Pause;
+      state = State::Paused;
 
       if (millis() - stopHeldCount >= holdToStopSec * 1000)
       {
-        state = State::Stop;
+        PlaySound(Tone::Stopped);
+        state = State::Stopped;
       }
       else if (millis() - stopHeldCount > 100)
       {
-        PrintLine(0, "Hold button");
-        char buf[20];
-        sprintf(buf, "to stop.     (%i)", int(holdToStopSec - (millis() - stopHeldCount) / 1000));
-        PrintLine(1, buf);
-
+        changeStateCountdown = holdToStopSec - (millis() - stopHeldCount) / 1000;
+        if (previousChangeStateCountdownStop != changeStateCountdown)
+        {
+          previousChangeStateCountdownStop = changeStateCountdown;
+          PlaySound(Tone::Countdown);
+        }
         buttonHeldFlag = true;
       }
       SetLED(LED::Stop, HIGH);
@@ -431,58 +499,16 @@ bool CheckControlButtons()
   return buttonHeldFlag;
 }
 
-void CheckMenuButtons()
+bool CheckMenuButtons()
 {
+  bool buttonPressedFlag = false;
+
   buttonMenuPrevious.read();
   buttonMenuNext.read();
   buttonOptionDecrement.read();
   buttonOptionIncrement.read();
 
-  if (state == State::Winding)
-  {
-    // Special during winding when the option buttons only control motor RPM.
-    if (buttonOptionDecrement.wasPressed())
-    {
-      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrement)
-      {
-        userParams.windingSpeedRpm -= windingRpmUserIncrement;
-        PlaySound(Tone::OptionDecrement);
-      }
-    }
-    if (buttonOptionIncrement.wasPressed())
-    {
-      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrement)
-      {
-        userParams.windingSpeedRpm += windingRpmUserIncrement;
-        PlaySound(Tone::OptionIncrement);
-      }
-    }
-    if (buttonOptionDecrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
-    {
-      if (userParams.windingSpeedRpm >= windingSpeedRpmMin + windingRpmUserIncrementHeld)
-      {
-        userParams.windingSpeedRpm -= windingRpmUserIncrementHeld;
-        PlaySound(Tone::OptionDecrementHeld);
-      }
-      else
-      {
-        userParams.windingSpeedRpm = windingSpeedRpmMin;
-      }
-    }
-    if (buttonOptionIncrement.pressedFor(buttonHeldDelayForMultipleIncrementMs))
-    {
-      if (userParams.windingSpeedRpm <= windingSpeedRpmMax - windingRpmUserIncrementHeld)
-      {
-        userParams.windingSpeedRpm += windingRpmUserIncrementHeld;
-        PlaySound(Tone::OptionIncrementHeld);
-      }
-      else
-      {
-        userParams.windingSpeedRpm = windingSpeedRpmMax;
-      }
-    }
-  }
-  else if (state == State::Standby)
+  if (state == State::Standby || state == State::Paused)
   {
 
     if (buttonMenuPrevious.wasPressed())
@@ -497,6 +523,7 @@ void CheckMenuButtons()
       }
 
       PlaySound(Tone::MenuPrevious);
+      buttonPressedFlag = true;
     }
 
     if (buttonMenuNext.wasPressed())
@@ -510,6 +537,12 @@ void CheckMenuButtons()
         menuSelect++;
       }
       PlaySound(Tone::MenuNext);
+      buttonPressedFlag = true;
+    }
+
+    if (menuSelect == int(MenuItem::Home))
+    {
+      return buttonPressedFlag;
     }
 
     // Option decrement.
@@ -565,6 +598,7 @@ void CheckMenuButtons()
           userParams.playSounds = true;
       }
       PlaySound(Tone::OptionDecrement);
+      buttonPressedFlag = true;
     }
 
     // Option increment.
@@ -620,6 +654,7 @@ void CheckMenuButtons()
           userParams.playSounds = true;
       }
       PlaySound(Tone::OptionIncrement);
+      buttonPressedFlag = true;
     }
 
     // Option decrement held down.
@@ -687,6 +722,7 @@ void CheckMenuButtons()
           userParams.indexBottom = indexPositionMin;
         }
       }
+      buttonPressedFlag = true;
     }
 
     // Option increment held down.
@@ -754,23 +790,19 @@ void CheckMenuButtons()
           userParams.indexBottom = indexPositionMax;
         }
       }
+      buttonPressedFlag = true;
     }
   }
+
+  return buttonPressedFlag;
 }
 
-void UpdateLCD()
+// ~52ms processing time.
+void UpdateLCD(DisplaySet displaySet)
 {
   char buf[20];
-  static unsigned long toggleDisplayMillis = millis();
-  static bool toggleDisplay;
 
-  if (millis() - toggleDisplayMillis > toggleDisplayDelay)
-  {
-    toggleDisplayMillis = millis();
-    toggleDisplay = !toggleDisplay;
-  }
-
-  if (state == State::Standby)
+  if (displaySet == DisplaySet::UserVariables)
   {
     if (menuSelect == int(MenuItem::Home))
     {
@@ -824,8 +856,15 @@ void UpdateLCD()
         PrintLine(1, "No");
     }
   }
-  else if (state == State::Winding)
+  else if (displaySet == DisplaySet::Winding)
   {
+    static bool toggleDisplay;
+    static unsigned long toggleDisplayMillis = millis();
+    if (millis() - toggleDisplayMillis > toggleDisplayDelay)
+    {
+      toggleDisplayMillis = millis();
+      toggleDisplay = !toggleDisplay;
+    }
     PrintLine(0, "Winding...");
     if (toggleDisplay)
       sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
@@ -836,17 +875,33 @@ void UpdateLCD()
 
     PrintLine(1, buf);
   }
-  else if (state == State::Pause)
+  else if (displaySet == DisplaySet::Paused)
   {
     PrintLine(0, "Winding paused.");
     sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
     PrintLine(1, buf);
   }
-  else if (state == State::Stop)
+  else if (state == State::Stopped)
   {
     PrintLine(0, "Winding stoped.");
     sprintf(buf, "%u of %u", rotationCount, userParams.windingCount);
     PrintLine(1, buf);
+  }
+  else if (displaySet == DisplaySet::Countdown)
+  {
+    if (state == State::Standby)
+    {
+      PrintLine(0, "Hold button");
+      sprintf(buf, "to start.    (%i)", changeStateCountdown);
+      PrintLine(1, buf);
+    }
+    else if (state == State::Paused)
+    {
+      PrintLine(0, "Hold button");
+      char buf[20];
+      sprintf(buf, "to stop.     (%i)", changeStateCountdown);
+      PrintLine(1, buf);
+    }
   }
 }
 
@@ -963,7 +1018,7 @@ void StateWinding(bool firstRunFlag)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
     PlaySound(Tone::StoppedWindingSuccess);
-    state = State::Stop;
+    state = State::Stopped;
   }
 }
 
@@ -981,13 +1036,13 @@ void StateController()
     StateWinding(resetWindingStateFlag);
     resetWindingStateFlag = false;
   }
-  else if (state == State::Pause)
+  else if (state == State::Paused)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
     stepper.stop();
     resetWindingStateFlag = true;
   }
-  else if (state == State::Stop)
+  else if (state == State::Stopped)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
     stepper.stop();
@@ -1130,10 +1185,51 @@ void loop()
 {
   StateController();
 
-  CheckMenuButtons();
+  UpdateLEDs();
 
-  bool controlButtonHeldFlag = CheckControlButtons();
+  bool menuButtonActiveFlag = CheckMenuButtons();
 
-  if (!controlButtonHeldFlag)
-    UpdateLCD(); // ~52ms processing time.
+  bool controlButtonActiveFlag = CheckControlButtons();
+
+  if (controlButtonActiveFlag)
+  {
+    UpdateLCD(DisplaySet::Countdown);
+  }
+  else if (state == State::Standby)
+  {
+    UpdateLCD(DisplaySet::UserVariables);
+  }
+  else if (state == State::Winding)
+  {
+    UpdateLCD(DisplaySet::Winding);
+  }
+  else if (state == State::Paused)
+  {
+    static unsigned long startMenuSwap = millis();
+    static bool menuSwapFlag = false;
+    if (menuButtonActiveFlag)
+    {
+      menuSwapFlag = true;
+      startMenuSwap = millis();
+    }
+    else
+    {
+      if (millis() - startMenuSwap > userMenuTimeoutDuringPaused)
+      {
+        menuSwapFlag = false;
+      }
+    }
+    if (menuSwapFlag)
+    {
+      UpdateLCD(DisplaySet::UserVariables);
+    }
+    else
+    {
+      UpdateLCD(DisplaySet::Paused);
+    }
+  }
+  else if (state == State::Stopped)
+  {
+    UpdateLCD(DisplaySet::Stopped);
+  }
 }
