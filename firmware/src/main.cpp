@@ -1,20 +1,24 @@
 /*
-  Project: Coil Winder
-  Author: Reuben Strangelove
-  Date: 2021/15/2
-  Description: Coil winder machine controller for winding electric musical intrument pickup coils.
+  Coil Winder
+  Reuben Strangelove
+  2021/15/2
+  
+  Coil winder machine controller for winding musical instrument pickup coils.
 
   Hardware:
     Microcontroller: Arduino Nano (Atmel Atmega328P)
     Motor driver: TB6612FNG (breakout module).
-    Stepper driver: TMC2208 (step stick, non-UART version).
+    Stepper driver: A4988 or TMC2208 (breakout module).
+	
+	  Winding Motor: DC 12V 1000RPM Gear Motor, 37mm diamter, offset shaft, model # ZYTD520.
+	  Index Stepper Motor: Nema 14 1.8deg Bipolar 12V 0.4A 14Ncm/20oz.in, module # 14HS10-0404S.
     
-  Notes:
-    
-
-  To Do:
+  To do:
     Add no motor RPM detected timeout.
-    Confirm/fix motor restart RPM overshoot.
+    Add deaccleration for motor stop.
+	
+	Known bugs:
+	  Motor overshoots RPM accleration when unpaused.
 
 
   HISTORY
@@ -57,7 +61,7 @@
 #define BUTTON_ACTIVE 0
 
 // Stepper.
-// Stepper is 200 steps per revolutioin and driver set for 1/2 microstepping.
+// Stepper is 200 steps per revolution and driver set for 1/2 microstepping.
 // Indexer lead screw is 2mm travel per turn (0.0787402 inches).
 // 0.0787402" / (200 / (1/2)) = 0.0001968505" per step
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
@@ -1127,7 +1131,7 @@ void CountRotation()
   }
 }
 
-// Timer interupt callback
+// Timer interupt callback.
 void IndexerStepperCallback()
 {
   stepper.run();
