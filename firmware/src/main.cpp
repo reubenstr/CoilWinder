@@ -67,7 +67,7 @@
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEPPER_DRIVER_STEP, PIN_STEPPER_DRIVER_DIR);
 const float stepperStepsPerRevolution = 200; // Most steppers are 200 steps/rev.
 const float stepperLeadScrewTravelPerRevolution = 0.0787402;
-const float stepperMicrosteps = 0.5;                                                                                        // Other user selectable options: 1/2, 1/4, 1/8, 1/16. (but precision is not necessary).
+const float stepperMicrosteps = 0.5; // 1/2 microsteps; other user selectable options: 1/2, 1/4, 1/8, 1/16. (but precision is not necessary).
 const double stepperTravelPerSteps = stepperLeadScrewTravelPerRevolution / (stepperStepsPerRevolution / stepperMicrosteps); //0.0001968505 inches.
 const double indexPositionUserIncrement = 0.025;                                                                            // Inches.
 const float indexPositionUserIncrementHeld = 0.100;
@@ -1056,7 +1056,7 @@ void StateController()
 // Call prior to enabling stepper tick interrupt.
 bool HomeIndexerStepper()
 {
-  PrintLine(0, "Homing indexer");
+  PrintLine(0, "Homing indexer...");
 
   stepper.setMaxSpeed(1000);
   stepper.setAcceleration(2000);
@@ -1143,7 +1143,7 @@ void IndexerStepperCallback()
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("Coil-Winder starting up...");
+  Serial.println(F("Coil-Winder starting up..."));
 
   pinMode(PIN_BUTTON_START, INPUT);
   pinMode(PIN_BUTTON_PAUSE, INPUT);
