@@ -17,10 +17,6 @@
     Add no motor RPM detected timeout.
     Add deaccleration for motor stop.
 	
-	Known bugs:
-	  Motor overshoots RPM accleration when unpaused.
-
-
   HISTORY
 
   VERSION   AUTHOR      DATE        NOTES
@@ -929,14 +925,14 @@ void StateWinding(bool firstRunFlag)
 
     int indexerStepperSpeedStepsSec = CalcStepsPerSecondFromRpm(userParams.indexSpeedRpm);
     int indexerStepperAcclerationStepsSec = CalcStepsPerSecondFromRpm(userParams.indexSpeedRpm) * 3;
-
     stepper.setMaxSpeed(indexerStepperSpeedStepsSec);
     stepper.setAcceleration(indexerStepperAcclerationStepsSec);
 
-    // Reset motor PID (hacky method to reset internal accumulator, but it works, mostly).
+    // Reset motor PID.
     motorPID.SetOutputLimits(0, 1);
-    motorPID.SetOutputLimits(motorPwmMin, motorPwmMax);
+    motorPID.SetMode(MANUAL); // Reinit accumulator by flipping modes.
     motorPID.SetMode(AUTOMATIC);
+    motorPID.SetOutputLimits(motorPwmMin, motorPwmMax); 
 
     if (userParams.windingDirection == 0)
     {
@@ -1016,7 +1012,7 @@ void StateWinding(bool firstRunFlag)
     }
   }
 
-  // Check for final conditions.
+  // Check for completion conditions.
   if (rotationCount >= userParams.windingCount)
   {
     analogWrite(PIN_MOTOR_PWM, 0);
